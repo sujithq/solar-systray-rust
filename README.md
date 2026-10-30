@@ -1,5 +1,17 @@
 # Solar Systray
 
+![Solar Systray dashboard illustration: live solar export and a start-now signal](assets/solar-systray-cover.svg)
+
+[![CI](https://github.com/sujithq/solar-systray-rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sujithq/solar-systray-rust/actions/workflows/ci.yml)
+[![Release](https://github.com/sujithq/solar-systray-rust/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sujithq/solar-systray-rust/actions/workflows/release.yml)
+[![Deploy](https://github.com/sujithq/solar-systray-rust/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/sujithq/solar-systray-rust/actions/workflows/deploy.yml)
+
+[![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Windows / Win32](https://img.shields.io/badge/Windows-Win32-0078D4)](https://microsoft.github.io/windows-docs-rs/)
+[![Cargo](https://img.shields.io/badge/build-Cargo-A65E2E?logo=rust&logoColor=white)](https://doc.rust-lang.org/cargo/)
+[![Serde / JSON](https://img.shields.io/badge/Serde-JSON-5B8C3E)](https://serde.rs/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A minimal Windows notification-area (system tray) app that shows the same solar-surplus
 information as [Solar Agent](https://github.com/madebyq/solar-agent): whether it is a good
 moment to start a big appliance, what the grid is doing right now, and whether this
