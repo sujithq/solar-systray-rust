@@ -1,5 +1,7 @@
 # Solar Systray
 
+![Solar Systray dashboard illustration: live solar export and a start-now signal](assets/solar-systray-cover.svg)
+
 A minimal Windows notification-area (system tray) app that shows the same solar-surplus
 information as [Solar Agent](https://github.com/madebyq/solar-agent): whether it is a good
 moment to start a big appliance, what the grid is doing right now, and whether this

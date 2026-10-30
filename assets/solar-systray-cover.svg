@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Solar Systray — know when your solar surplus is ready</title>
+  <desc id="description">A glowing sun sends clean energy through solar panels to a Windows system tray status card showing stable export and a green start-now signal.</desc>
+  <defs>
+    <linearGradient id="background" x1="76" y1="22" x2="1097" y2="472" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111B3B"/>
+      <stop offset=".55" stop-color="#152B4A"/>
+      <stop offset="1" stop-color="#123A49"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="118" y1="84" x2="264" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF1A8"/>
+      <stop offset="1" stop-color="#FFB95C"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="350" y1="264" x2="621" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#426FA8"/>
+      <stop offset="1" stop-color="#253F70"/>
+    </linearGradient>
+    <linearGradient id="card" x1="728" y1="88" x2="1064" y2="355" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#203553"/>
+      <stop offset="1" stop-color="#172943"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="240" y1="201" x2="774" y2="200" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD277"/>
+      <stop offset=".54" stop-color="#8BE5C3"/>
+      <stop offset="1" stop-color="#68E2A3"/>
+    </linearGradient>
+    <filter id="glow" x="99" y="46" width="194" height="194" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="17"/>
+    </filter>
+    <filter id="shadow" x="700" y="65" width="390" height="327" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="12"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".28"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="stars" width="120" height="96" patternUnits="userSpaceOnUse">
+      <circle cx="13" cy="17" r="1" fill="#D6E8FF" fill-opacity=".52"/>
+      <circle cx="81" cy="51" r="1.2" fill="#D6E8FF" fill-opacity=".32"/>
+      <circle cx="108" cy="12" r=".8" fill="#D6E8FF" fill-opacity=".38"/>
+      <circle cx="47" cy="81" r=".8" fill="#D6E8FF" fill-opacity=".3"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="440" rx="28" fill="url(#background)"/>
+  <rect width="1200" height="440" rx="28" fill="url(#stars)" opacity=".8"/>
+  <circle cx="196" cy="143" r="75" fill="#FFC46F" fill-opacity=".42" filter="url(#glow)"/>
+  <circle cx="196" cy="143" r="53" fill="url(#sun)"/>
+  <path d="M196 58V42m0 202v-16m85-85h16m-202 0h16m145-60 12-12M112 203l12-12m144 12-12-12M124 84l-12-12" stroke="#FFE4A0" stroke-width="5" stroke-linecap="round" opacity=".82"/>
+
+  <path d="M238 181c63 31 98 18 143 28 59 13 83 21 148 15 74-7 117-43 186-32 31 5 54 18 81 21" stroke="#76E7B3" stroke-opacity=".12" stroke-width="20" stroke-linecap="round"/>
+  <path d="M240 181c63 31 98 18 143 28 59 13 83 21 148 15 74-7 117-43 186-32 31 5 54 18 81 21" stroke="url(#flow)" stroke-width="3" stroke-linecap="round" stroke-dasharray="2 12"/>
+  <path d="m772 202 20-9-5 21" stroke="#82E9B6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="380" cy="205" r="4" fill="#FFD277"/>
+  <circle cx="584" cy="218" r="4" fill="#A3E8C6"/>
+
+  <path d="m337 275 243-22 54 102-244 28-53-108Z" fill="url(#panel)" stroke="#82A9DA" stroke-opacity=".72" stroke-width="2"/>
+  <path d="m378 271 46 99m2-104 47 99m1-104 47 99m1-104 47 99m1-104 47 99M354 310l258-22m-241 55 259-22" stroke="#9FC5EF" stroke-opacity=".65" stroke-width="2"/>
+  <path d="m460 387 4 18m76-27 4 18m-114 9 142-16" stroke="#9CB2CA" stroke-width="4" stroke-linecap="round"/>
+  <path d="m426 261 23-22m110 12 20-21" stroke="#B6D7F2" stroke-width="2" stroke-linecap="round" opacity=".8"/>
+
+  <g filter="url(#shadow)">
+    <rect x="736" y="87" width="326" height="257" rx="22" fill="url(#card)" stroke="#7193B6" stroke-opacity=".4"/>
+    <path d="M758 126h282" stroke="#A9BED4" stroke-opacity=".15"/>
+    <circle cx="769" cy="108" r="4" fill="#7FE3AB"/>
+    <circle cx="785" cy="108" r="4" fill="#FFD17D" fill-opacity=".8"/>
+    <circle cx="801" cy="108" r="4" fill="#A2B5CE" fill-opacity=".65"/>
+    <rect x="778" y="151" width="44" height="44" rx="13" fill="#254F4B"/>
+    <path d="M800 160v25m-9-9 9 9 9-9" stroke="#83E7A8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="839" y="166" fill="#A8BED4" font-family="Segoe UI,Arial,sans-serif" font-size="12" font-weight="600" letter-spacing="1.7">SOLAR SYSTRAY</text>
+    <text x="839" y="190" fill="#F2F7FC" font-family="Segoe UI,Arial,sans-serif" font-size="19" font-weight="700">GO · START NOW</text>
+    <path d="M778 215h242" stroke="#A9BED4" stroke-opacity=".16"/>
+    <text x="778" y="247" fill="#A8BED4" font-family="Segoe UI,Arial,sans-serif" font-size="13">GRID EXPORT</text>
+    <text x="778" y="289" fill="#F5FAFF" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="650">2.26<tspan fill="#A8BED4" font-size="20" font-weight="500"> kW</tspan></text>
+    <path d="M952 278h18l10-17 13 29 13-21h17" stroke="#77E3AB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="1018" cy="159" r="5" fill="#81E7A6"/>
+    <text x="1032" y="163" fill="#B5C9D9" font-family="Segoe UI,Arial,sans-serif" font-size="11">LIVE</text>
+    <rect x="778" y="309" width="242" height="4" rx="2" fill="#A7BDD2" fill-opacity=".15"/>
+    <rect x="778" y="309" width="181" height="4" rx="2" fill="#74DEA9"/>
+  </g>
+
+  <text x="78" y="368" fill="#F5F8FC" font-family="Segoe UI,Arial,sans-serif" font-size="31" font-weight="700" letter-spacing="-.5">Solar surplus, at a glance.</text>
+  <text x="80" y="398" fill="#B7C9D9" font-family="Segoe UI,Arial,sans-serif" font-size="15" letter-spacing=".15">A lightweight Windows tray companion for your energy.</text>
+</svg>
