@@ -1,0 +1,18 @@
+{
+  "description": "Sun elevation in degrees from the NOAA approximation; times are UTC milliseconds. Sunrise and sunset match published times to within about a minute.",
+  "samples": [
+    { "label": "Brussels summer sunrise", "time": 1718940000000, "latitude": 50.85, "longitude": 4.35, "elevation": -1.887, "sun": "down" },
+    { "label": "Brussels summer sunrise", "time": 1718940900000, "latitude": 50.85, "longitude": 4.35, "elevation": -0.091, "sun": "up" },
+    { "label": "Brussels summer noon", "time": 1718970300000, "latitude": 50.85, "longitude": 4.35, "elevation": 62.587, "sun": "up" },
+    { "label": "Brussels summer sunset", "time": 1718999700000, "latitude": 50.85, "longitude": 4.35, "elevation": -0.211, "sun": "up" },
+    { "label": "Brussels summer sunset", "time": 1719000300000, "latitude": 50.85, "longitude": 4.35, "elevation": -1.413, "sun": "down" },
+    { "label": "Brussels winter sunrise", "time": 1734766800000, "latitude": 50.85, "longitude": 4.35, "elevation": -1.184, "sun": "down" },
+    { "label": "Brussels winter sunrise", "time": 1734767400000, "latitude": 50.85, "longitude": 4.35, "elevation": 0.056, "sun": "up" },
+    { "label": "Brussels winter midnight", "time": 1734822000000, "latitude": 50.85, "longitude": 4.35, "elevation": -61.450, "sun": "down" },
+    { "label": "Sydney winter sunrise", "time": 1718916900000, "latitude": -33.87, "longitude": 151.21, "elevation": -1.764, "sun": "down" },
+    { "label": "Sydney winter sunrise", "time": 1718917500000, "latitude": -33.87, "longitude": 151.21, "elevation": 0.069, "sun": "up" },
+    { "label": "Los Angeles noon", "time": 1742500500000, "latitude": 34.05, "longitude": -118.24, "elevation": 56.110, "sun": "up" },
+    { "label": "Tromso polar night noon", "time": 1734778800000, "latitude": 69.65, "longitude": 18.96, "elevation": -3.142, "sun": "down" },
+    { "label": "Tromso midnight sun", "time": 1719010800000, "latitude": 69.65, "longitude": 18.96, "elevation": 3.118, "sun": "up" }
+  ]
+}

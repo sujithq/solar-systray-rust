@@ -1,0 +1,26 @@
+name: Bug report
+description: Report incorrect or unexpected behavior.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the behavior you observed and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: Include relevant configuration, input, and steps. Remove private network details.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment
+      description: Operating system, Rust version, and any relevant device or protocol details.
+    validations:
+      required: false

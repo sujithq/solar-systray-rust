@@ -1,0 +1,5 @@
+{"label":"padded-values","i1":"000123.456*kWh","i2":"000234.567*kWh","e1":"000345.678*kWh","e2":"000456.789*kWh","valid":true,"i1Wh":123456,"i2Wh":234567,"e1Wh":345678,"e2Wh":456789}
+{"label":"zero-values","i1":"000000.000*kWh","i2":"000000.001*kWh","e1":"000000.002*kWh","e2":"000000.003*kWh","valid":true,"i1Wh":0,"i2Wh":1,"e1Wh":2,"e2Wh":3}
+{"label":"missing-decimals","i1":"000123*kWh","i2":"000234.567*kWh","e1":"000345.678*kWh","e2":"000456.789*kWh","valid":false}
+{"label":"excess-precision","i1":"000123.4567*kWh","i2":"000234.567*kWh","e1":"000345.678*kWh","e2":"000456.789*kWh","valid":false}
+{"label":"wrong-unit","i1":"000123.456*Wh","i2":"000234.567*kWh","e1":"000345.678*kWh","e2":"000456.789*kWh","valid":false}

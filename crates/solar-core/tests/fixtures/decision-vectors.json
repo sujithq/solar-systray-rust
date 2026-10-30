@@ -1,0 +1,39 @@
+{
+  "description": "Synthetic cross-platform contract for the future ESP32 port. All times are milliseconds; no household data. `sun` defaults to up.",
+  "decision": {
+    "stableDurationSeconds": 5,
+    "staleAfterSeconds": 3,
+    "maxSurplusW": 3000,
+    "levelHysteresisW": 200
+  },
+  "samples": [
+    { "time": 0, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 2000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 4000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 5000, "exportW": 4000, "importW": 0, "state": "EXCELLENT", "go": true, "level": "MAX_SURPLUS" },
+    { "time": 6000, "exportW": 2400, "importW": 0, "state": "GOOD", "go": true, "level": "SURPLUS" },
+    { "time": 7000, "exportW": 2300, "importW": 0, "state": "LIMITED", "go": false, "level": "SURPLUS" },
+    { "time": 8000, "exportW": 2450, "importW": 0, "state": "LIMITED", "go": false, "level": "SURPLUS" },
+    { "time": 9000, "exportW": 5000, "importW": 1, "state": "IMPORTING", "go": false, "level": "IMPORTING" },
+    { "time": 10000, "exportW": 100, "importW": 0, "state": "IDLE", "go": false, "level": "PRODUCING" },
+    { "time": 11000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 15000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 16000, "offline": true, "state": "OFFLINE", "go": false, "level": "OFFLINE" },
+    { "time": 17000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 19000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 21000, "exportW": 4000, "importW": 0, "state": "LIMITED", "go": false, "level": "MAX_SURPLUS" },
+    { "time": 22000, "exportW": 2600, "importW": 0, "state": "GOOD", "go": true, "level": "SURPLUS" },
+    { "time": 23000, "exportW": 2900, "importW": 0, "state": "GOOD", "go": true, "level": "SURPLUS" },
+    { "time": 24000, "exportW": 3000, "importW": 0, "state": "GOOD", "go": true, "level": "MAX_SURPLUS" },
+    { "time": 25000, "exportW": 2800, "importW": 0, "state": "GOOD", "go": true, "level": "MAX_SURPLUS" },
+    { "time": 26000, "exportW": 250, "importW": 0, "state": "LIMITED", "go": false, "level": "SURPLUS" },
+    { "time": 27000, "exportW": 101, "importW": 0, "state": "LIMITED", "go": false, "level": "SURPLUS" },
+    { "time": 28000, "exportW": 100, "importW": 0, "state": "IDLE", "go": false, "level": "PRODUCING" },
+    { "time": 29000, "exportW": 300, "importW": 0, "state": "LIMITED", "go": false, "level": "PRODUCING" },
+    { "time": 30000, "exportW": 301, "importW": 0, "state": "LIMITED", "go": false, "level": "SURPLUS" },
+    { "time": 31000, "exportW": 4000, "importW": 0, "sun": "down", "state": "LIMITED", "go": false, "level": "NIGHT" },
+    { "time": 32000, "exportW": 0, "importW": 500, "sun": "down", "state": "IMPORTING", "go": false, "level": "NIGHT" },
+    { "time": 33000, "exportW": 0, "importW": 500, "state": "IMPORTING", "go": false, "level": "IMPORTING" },
+    { "time": 34000, "exportW": 0, "importW": 0, "sun": "unknown", "state": "IDLE", "go": false, "level": "PRODUCING" }
+  ]
+}

@@ -1,0 +1,157 @@
+name: Release
+
+# Prepares a release on Windows (version bump, checks, build, package, release commit and tag),
+# stores everything as the `release` artifact, then calls the Deploy workflow. Nothing reaches
+# the repository or the Releases page until someone approves the `release` environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "patch, minor, major, or an exact version such as 0.1.0"
+        required: true
+        default: patch
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          Write-Output "::error::Releases are made from main, not $env:GITHUB_REF."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          cargo --version
+
+      - name: Bump version and changelog
+        id: bump
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = cargo xtask prepare $env:REQUESTED
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Unexpected version output: $version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Check
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo clippy --locked --workspace --all-targets -- -D warnings -A clippy::approx_constant
+          cargo test --locked --workspace
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo build --locked --release -p solar-tray
+          $product = (Get-Item target/release/solar-systray.exe).VersionInfo.ProductVersion
+          if ($product -ne $env:VERSION) { throw "solar-systray.exe reports version $product, expected $env:VERSION" }
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $dist = Join-Path $env:RUNNER_TEMP dist
+          $name = "solar-systray-$env:VERSION-windows-x64"
+          $stage = New-Item -ItemType Directory -Path (Join-Path $dist $name)
+          $assets = New-Item -ItemType Directory -Path (Join-Path $dist assets)
+          Copy-Item target/release/solar-systray.exe, README.md, LICENSE, CHANGELOG.md -Destination $stage
+          $zip = Join-Path $assets "$name.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+          Remove-Item -Recurse $stage
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$zip.sha256", "$hash  $name.zip`n")
+          cargo xtask notes $env:VERSION (Join-Path $dist release-notes.md)
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Commit and tag
+        id: commit
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $allowed = 'CHANGELOG.md', 'Cargo.lock', 'Cargo.toml'
+          $changed = @(git status --porcelain --untracked-files=all | ForEach-Object { $_.Substring(3) })
+          $unexpected = @($changed | Where-Object { $_ -notin $allowed })
+          if ($unexpected -or 'CHANGELOG.md' -notin $changed) { throw "Unexpected changes: $($changed -join ', ')" }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- $allowed
+          git commit --quiet -m "Release v$env:VERSION"
+          git tag -a "v$env:VERSION" -m "Solar Systray $env:VERSION"
+          git bundle create (Join-Path $env:RUNNER_TEMP dist release.bundle) "refs/tags/v$env:VERSION" "^$env:GITHUB_SHA"
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+
+      - name: Summarize for the approver
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $diff = git --no-pager show --format= --no-color HEAD | Out-String
+          $notes = Get-Content -Raw (Join-Path $env:RUNNER_TEMP dist release-notes.md)
+          $fence = '`' * 4
+          @(
+            "## Solar Systray $env:VERSION is ready to deploy"
+            ''
+            "Approving the **release** environment pushes ``v$env:VERSION`` and this commit to ``main``, then publishes the GitHub release."
+            ''
+            "- Asset: ``solar-systray-$env:VERSION-windows-x64.zip``"
+            "- SHA-256: ``$env:SHA256``"
+            ''
+            '### Release notes'
+            ''
+            $notes
+            '### Release commit'
+            ''
+            "${fence}diff"
+            $diff.TrimEnd()
+            $fence
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    name: Deploy
+    needs: prepare
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      commit: ${{ needs.prepare.outputs.commit }}

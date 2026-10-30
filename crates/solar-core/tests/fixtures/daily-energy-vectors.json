@@ -1,0 +1,16 @@
+{"case":"tariff-increments","day":20617,"minute":0,"offset":120,"meterTime":1000000,"i1":100000,"i2":20000,"e1":30000,"e2":40000,"available":true,"importWh":0,"exportWh":0,"since":0,"reason":"available"}
+{"case":"tariff-increments","day":20617,"minute":60,"offset":120,"meterTime":4600000,"i1":101000,"i2":20500,"e1":30050,"e2":40100,"available":true,"importWh":1500,"exportWh":150,"since":0,"reason":"available"}
+{"case":"tariff-increments","clock":false,"day":20617,"minute":80,"offset":120,"meterTime":5800000,"i1":101000,"i2":20500,"e1":30050,"e2":40100,"available":false,"reason":"missing-meter-time"}
+{"case":"tariff-increments","day":20617,"minute":90,"offset":120,"meterTime":6400000,"i1":101000,"i2":20500,"e1":30050,"e2":40100,"totals":false,"available":false,"reason":"missing-or-invalid-totals"}
+{"case":"tariff-increments","day":20617,"minute":120,"offset":120,"meterTime":8200000,"i1":101500,"i2":20500,"e1":30200,"e2":40100,"available":true,"importWh":2000,"exportWh":300,"since":0,"reason":"available"}
+{"case":"tariff-increments","day":20617,"minute":130,"offset":120,"meterTime":8800000,"i1":101501,"i2":20499,"e1":30201,"e2":40100,"available":false,"reason":"counter-decreased"}
+{"case":"tariff-increments","day":20617,"minute":135,"offset":120,"meterTime":9100000,"i1":101550,"i2":20525,"e1":30225,"e2":40125,"totals":false,"available":false,"reason":"missing-or-invalid-totals"}
+{"case":"tariff-increments","day":20617,"minute":140,"offset":120,"meterTime":9400000,"i1":101600,"i2":20550,"e1":30250,"e2":40150,"available":false,"reason":"counter-decreased"}
+{"case":"tariff-increments","day":20618,"minute":2,"offset":120,"meterTime":87400000,"i1":102000,"i2":21000,"e1":31000,"e2":41000,"available":true,"importWh":0,"exportWh":0,"since":2,"reason":"available"}
+{"case":"tariff-increments","day":20618,"minute":180,"offset":120,"meterTime":98200000,"i1":102100,"i2":21000,"e1":31000,"e2":41000,"available":true,"importWh":100,"exportWh":0,"since":2,"reason":"available"}
+{"case":"tariff-increments","day":20618,"minute":180,"offset":60,"meterTime":101800000,"i1":102200,"i2":21000,"e1":31000,"e2":41000,"available":false,"reason":"clock-discontinuity"}
+{"case":"tariff-increments","day":20619,"minute":1,"offset":60,"meterTime":187000000,"i1":103000,"i2":22000,"e1":32000,"e2":42000,"available":true,"importWh":0,"exportWh":0,"since":1,"reason":"available"}
+{"case":"tariff-increments","day":20619,"minute":2,"offset":60,"meterTime":187060000,"i1":103001,"i2":22000,"e1":32001,"e2":42000,"fresh":false,"available":false,"reason":"stale"}
+{"case":"tariff-increments","day":20619,"minute":3,"offset":60,"meterTime":187120000,"i1":103002,"i2":22000,"e1":32002,"e2":42000,"available":true,"importWh":2,"exportWh":2,"since":1,"reason":"available"}
+{"case":"tariff-increments","day":20619,"minute":5,"offset":60,"meterTime":187240000,"i1":103010,"i2":22000,"e1":32010,"e2":42000,"available":true,"importWh":10,"exportWh":10,"since":1,"reason":"available"}
+{"case":"tariff-increments","day":20619,"minute":4,"offset":60,"meterTime":187180000,"i1":103011,"i2":22000,"e1":32011,"e2":42000,"available":false,"reason":"clock-discontinuity"}

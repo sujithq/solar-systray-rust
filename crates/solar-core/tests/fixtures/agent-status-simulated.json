@@ -1,0 +1,93 @@
+{
+  "state": "idle",
+  "companion": {
+    "mode": "solar",
+    "solar": {
+      "energySource": { "type": "mock" },
+      "inverterSource": { "host": "", "port": 502, "unitId": 1 },
+      "decision": { "defaultAppliance": "washingMachine" },
+      "location": { "latitude": null, "longitude": null },
+      "appliances": {
+        "washingMachine": { "name": "Washing machine", "peakW": 2200 },
+        "dishwasher": { "name": "Dishwasher", "peakW": 1500 }
+      }
+    },
+    "snapshot": {
+      "appliance": "washingMachine",
+      "applianceName": "Washing machine",
+      "appliancePeakW": 2200,
+      "requiredW": 2500,
+      "startThresholdW": 2650,
+      "safeToStart": true,
+      "surplusW": 2800,
+      "gridImportW": 0,
+      "stableSeconds": 12,
+      "level": "SURPLUS",
+      "sun": "unknown",
+      "sunElevation": null,
+      "minimumExportW": 100,
+      "maxSurplusW": 5000,
+      "importPeakW": 2500,
+      "importGaugeMaxW": 11000,
+      "gaugeImportPeakW": 2500,
+      "gaugeImportMaxW": 11000,
+      "gaugeThickness": "standard",
+      "displayRefreshSeconds": 5,
+      "currentDemandW": null,
+      "monthlyPeakW": null,
+      "monthlyPeakReached": false,
+      "state": "GOOD",
+      "reason": "Enough stable surplus for the washing machine",
+      "characterMode": 2,
+      "peakForecast": {
+        "available": false,
+        "reason": "waiting-for-quarter-data",
+        "projectedW": null,
+        "comparisonW": null,
+        "comparisonIsMinimum": false,
+        "secondsLeft": null,
+        "reduceW": null,
+        "crossingSeconds": null,
+        "warning": false
+      },
+      "dailyEnergy": { "available": false, "importWh": null, "exportWh": null, "sinceMinute": null, "reason": "simulated" },
+      "simulated": true,
+      "scenario": "good",
+      "scenarios": ["max", "excellent", "good"],
+      "simulatedW": -2800,
+      "simulation": {
+        "minW": -5000,
+        "maxW": 11000,
+        "limitW": 11000,
+        "presets": [
+          { "id": "excellent", "label": "Excellent", "watts": -4100 },
+          { "id": "good", "label": "Good", "watts": -2800 },
+          { "id": "importing", "label": "Importing", "watts": 400 }
+        ]
+      },
+      "appliances": {
+        "washingMachine": { "name": "Washing machine", "peakW": 2200 },
+        "dishwasher": { "name": "Dishwasher", "peakW": 1500 }
+      },
+      "stableDurationSeconds": 10,
+      "locationConfigured": false,
+      "sunrise": null,
+      "sunset": null,
+      "diagnostics": { "simulated": true, "connected": true, "telegrams": 6, "lastReadingAt": 1793377586004 },
+      "inverter": {
+        "status": "disabled",
+        "pvPowerW": null,
+        "activePowerW": null,
+        "timestamp": null,
+        "householdUseW": null,
+        "issue": null
+      },
+      "nightBaselineW": null,
+      "nightBaselineLearned": false,
+      "nightBaselineSamples": 0,
+      "readingAt": 1793377586004,
+      "checkedAt": 1793377586805,
+      "disclaimer": "Present-surplus advice only. A full appliance cycle is not guaranteed to run on solar."
+    }
+  }
+}

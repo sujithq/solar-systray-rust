@@ -1,0 +1,123 @@
+{
+  "state": "sleep",
+  "companion": {
+    "mode": "solar",
+    "solar": {
+      "energySource": { "type": "slimmelezer", "host": "192.0.2.10", "port": 23, "allowLegacyWithoutCrc": false },
+      "inverterSource": { "host": "192.0.2.30", "port": 502, "unitId": 1 },
+      "decision": {
+        "safetyMarginW": 300,
+        "stableDurationSeconds": 10,
+        "staleAfterSeconds": 300,
+        "minimumExportW": 100,
+        "hysteresisW": 150,
+        "excellentExtraW": 1500,
+        "maxSurplusW": 5000,
+        "levelHysteresisW": 200,
+        "importPeakW": 2500,
+        "importGaugeMaxW": 11000,
+        "gaugeThickness": "bold",
+        "displayRefreshSeconds": 5,
+        "defaultAppliance": "dishwasher"
+      },
+      "location": { "latitude": 50.85, "longitude": 4.35 },
+      "devicePower": { "sleepEnabled": true, "sleepStart": "22:00", "sleepEnd": "06:00" },
+      "appliances": {
+        "dishwasher": { "name": "Dishwasher", "peakW": 1500 },
+        "washingMachine": { "name": "Washing machine", "peakW": 2200 },
+        "heatPumpDryer": { "name": "Heat-pump dryer", "peakW": 1200 },
+        "conventionalDryer": { "name": "Conventional dryer", "peakW": 2500 }
+      }
+    },
+    "snapshot": {
+      "appliance": "dishwasher",
+      "applianceName": "Dishwasher",
+      "appliancePeakW": 1500,
+      "requiredW": 1800,
+      "startThresholdW": 1950,
+      "safeToStart": false,
+      "surplusW": 0,
+      "gridImportW": 1250,
+      "stableSeconds": 0,
+      "level": "NIGHT",
+      "sun": "down",
+      "sunElevation": -1.7,
+      "minimumExportW": 100,
+      "maxSurplusW": 5000,
+      "importPeakW": 2500,
+      "importGaugeMaxW": 11000,
+      "gaugeImportPeakW": 3150,
+      "gaugeImportMaxW": 11000,
+      "gaugeThickness": "bold",
+      "displayRefreshSeconds": 5,
+      "currentDemandW": 1310,
+      "monthlyPeakW": 3150,
+      "monthlyPeakReached": false,
+      "state": "IMPORTING",
+      "reason": "Grid electricity is being imported",
+      "characterMode": 5,
+      "peakForecast": {
+        "available": true,
+        "reason": "ok",
+        "projectedW": 1612.7777777777778,
+        "comparisonW": 3150,
+        "comparisonIsMinimum": false,
+        "secondsLeft": 218,
+        "reduceW": 0,
+        "crossingSeconds": null,
+        "warning": false
+      },
+      "dailyEnergy": { "available": true, "importWh": 2100, "exportWh": 8400, "sinceMinute": 420, "reason": "available" },
+      "simulated": false,
+      "scenario": null,
+      "scenarios": [
+        "max", "excellent", "good", "limited", "importing", "idle", "producing-importing", "inverter-offline", "night",
+        "offline", "peak-approaching", "peak-avoided", "peak-exceeded", "peak-rollover", "peak-no-time"
+      ],
+      "simulatedW": null,
+      "simulation": null,
+      "appliances": {
+        "dishwasher": { "name": "Dishwasher", "peakW": 1500 },
+        "washingMachine": { "name": "Washing machine", "peakW": 2200 },
+        "heatPumpDryer": { "name": "Heat-pump dryer", "peakW": 1200 },
+        "conventionalDryer": { "name": "Conventional dryer", "peakW": 2500 }
+      },
+      "stableDurationSeconds": 10,
+      "locationConfigured": true,
+      "sunrise": 1793428380000,
+      "sunset": 1793463540000,
+      "diagnostics": {
+        "connected": true,
+        "bytes": 4968000,
+        "telegrams": 3600,
+        "errors": 2,
+        "reconnects": 0,
+        "lastIssue": null,
+        "lastReadingAt": 1793377586004,
+        "dsmrVersion": "5.0.2",
+        "p1Version": "50217",
+        "checksum": "verified",
+        "intervalMs": 1000
+      },
+      "inverter": {
+        "status": "online",
+        "pvPowerW": 0,
+        "activePowerW": 0,
+        "timestamp": 1793377586092,
+        "householdUseW": 1250,
+        "issue": null
+      },
+      "nightBaselineW": 200,
+      "nightBaselineLearned": false,
+      "nightBaselineSamples": 8,
+      "readingAt": 1793377586004,
+      "checkedAt": 1793377586805,
+      "disclaimer": "Present-surplus advice only. A full appliance cycle is not guaranteed to run on solar."
+    },
+    "deviceSupported": null,
+    "deviceError": null,
+    "device": { "status": "unknown", "revision": null, "mode": null, "differences": [], "error": null }
+  },
+  "transport": null,
+  "connected": false
+}

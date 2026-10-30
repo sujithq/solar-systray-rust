@@ -1,0 +1,94 @@
+name: Deploy
+
+# Called by the Release workflow after its Prepare job. Waits for approval of the `release`
+# environment, pushes the prepared release commit and tag to main, and publishes the GitHub
+# release with the packaged assets.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version prepared by the Release workflow, such as 0.1.0
+        required: true
+        type: string
+      commit:
+        description: Release commit prepared by the Release workflow
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${{ inputs.version }}
+    permissions:
+      actions: read
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+      COMMIT: ${{ inputs.commit }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check inputs and approval rule
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Invalid version: $VERSION"; exit 1; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid commit: $COMMIT"; exit 1; }
+          # GitHub creates a missing environment without protection, which would skip approval.
+          reviewers="$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers | length] | add // 0')"
+          if (( reviewers < 1 )); then
+            echo "::error::The release environment has no required reviewers, so nobody approved this release. Add reviewers under Settings > Environments > release, then re-run."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: repo
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      - name: Push release commit and tag
+        working-directory: repo
+        run: |
+          bundle="$GITHUB_WORKSPACE/dist/release.bundle"
+          tag="refs/tags/v$VERSION"
+          git bundle verify --quiet "$bundle"
+          git fetch --no-tags "$bundle" "$tag:$tag"
+          if [[ "$(git rev-parse "$tag^{commit}")" != "$COMMIT" ]]; then
+            echo "::error::v$VERSION in the bundle does not point at $COMMIT."
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$COMMIT^@")" != "$GITHUB_SHA" ]]; then
+            echo "::error::$COMMIT is not a single commit on top of $GITHUB_SHA."
+            exit 1
+          fi
+          files="$(git diff --name-only "$GITHUB_SHA" "$COMMIT")"
+          while read -r file; do
+            case "$file" in
+              CHANGELOG.md | Cargo.lock | Cargo.toml) ;;
+              *) echo "::error::Unexpected file in the release commit: $file"; exit 1 ;;
+            esac
+          done <<< "$files"
+          # Atomic and fast-forward only: if main moved since Prepare, neither ref is updated.
+          git push --atomic origin "$COMMIT:refs/heads/main" "$tag"
+
+      - name: Publish GitHub release
+        run: |
+          gh release create "v$VERSION" dist/assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Solar Systray $VERSION" \
+            --notes-file dist/release-notes.md
