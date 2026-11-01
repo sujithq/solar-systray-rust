@@ -189,14 +189,16 @@ fn start_direct(config: &SolarConfig, tray: &TraySettings) -> SolarService {
 fn load(
     path: &Path,
     companion: Option<&Path>,
+    isolated_ha: bool,
     prepare: impl FnOnce(bool) -> Option<AgentResult>,
 ) -> (Mode, Option<Note>) {
-    let loaded = match settings::load_or_seed(path, companion) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            return (Mode::Broken(error.clone()), Some(Note::new("Solar Systray: config error", error, true)));
-        }
-    };
+    let loaded =
+        match if isolated_ha { settings::load_existing_ha(path) } else { settings::load_or_seed(path, companion) } {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return (Mode::Broken(error.clone()), Some(Note::new("Solar Systray: config error", error, true)));
+            }
+        };
     let ha = loaded.solar.is_ha();
     let agent = prepare(ha).filter(|_| !ha);
     let feed = match agent {
@@ -443,6 +445,7 @@ struct App {
     hwnd: HWND,
     path: PathBuf,
     companion: Option<PathBuf>,
+    isolated_ha: bool,
     mode: Mode,
     agent: Option<AgentLink>,
     chooser: Option<SourceChooser>,
@@ -598,7 +601,11 @@ impl App {
             }
         }
         MenuBuilder::separator(root);
-        menu.check(root, "Start at sign-in", Action::ToggleAutostart, autostart::is_enabled());
+        if !self.isolated_ha {
+            menu.check(root, "Start at sign-in", Action::ToggleAutostart, autostart::is_enabled());
+        } else {
+            menu.info(root, "Isolated HA monitoring");
+        }
         menu.add(root, "Open config file", Action::OpenConfig, MF_STRING);
         menu.add(root, "Reload config", Action::ReloadConfig, MF_STRING);
         MenuBuilder::separator(root);
@@ -656,6 +663,9 @@ impl App {
                 self.reload();
                 None
             }
+            Action::ToggleAutostart if self.isolated_ha => {
+                Some("Autostart is disabled for isolated HA monitoring.".into())
+            }
             Action::ToggleAutostart => autostart::set_enabled(!autostart::is_enabled()).err(),
             Action::Notify(kind) => self.change_tray(|tray| {
                 let flag = tray.notifications.flag_mut(kind);
@@ -700,7 +710,7 @@ impl App {
         // Stop the old connections before the new ones start.
         self.mode = Mode::Broken(String::new());
         let base = settings::local_app_data();
-        let (mode, note) = load(&self.path, self.companion.as_deref(), |ha| {
+        let (mode, note) = load(&self.path, self.companion.as_deref(), self.isolated_ha, |ha| {
             if !ha && self.agent.is_none() {
                 self.started = Instant::now();
             }
@@ -943,20 +953,28 @@ pub fn run() -> Result<(), String> {
         message_box("Solar Systray is already running. Look for its icon in the notification area.", false);
         return Ok(());
     }
-    let base = settings::local_app_data().ok_or("The LOCALAPPDATA folder is not set.")?;
-    let path = settings::config_path(&base);
-    let companion = Some(settings::companion_path(&base));
+    let override_path = settings::isolated_ha_path(std::env::var_os(settings::HA_CONFIG_ENV))?;
+    let isolated_ha = override_path.is_some();
+    let base = settings::local_app_data();
+    let path = match override_path {
+        Some(path) => path,
+        None => settings::config_path(base.as_deref().ok_or("The LOCALAPPDATA folder is not set.")?),
+    };
+    let companion = if isolated_ha { None } else { base.as_deref().map(settings::companion_path) };
     let hwnd = create_window().map_err(|e| format!("Cannot create the tray window: {}", e.message()))?;
     TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }, Ordering::Relaxed);
 
     // Read explicit source mode first; only legacy modes may ask Solar Agent.
     let mut agent = None;
     let mut chooser = None;
-    let (mode, note) = load(&path, companion.as_deref(), |ha| start_legacy(Some(&base), &mut agent, &mut chooser, ha));
+    let (mode, note) = load(&path, companion.as_deref(), isolated_ha, |ha| {
+        start_legacy(base.as_deref(), &mut agent, &mut chooser, ha)
+    });
     let mut app = App {
         hwnd,
         path,
         companion,
+        isolated_ha,
         mode,
         agent,
         chooser,
@@ -1003,7 +1021,7 @@ mod tests {
         assert!(std::env::var_os("SOLAR_HA_SELECTION_TEST_UNCONFIGURED").is_none());
         let mut agent = None;
         let mut chooser = None;
-        let (mode, _) = load(&path, None, |ha| {
+        let (mode, _) = load(&path, None, true, |ha| {
             assert!(ha);
             start_legacy(None, &mut agent, &mut chooser, ha)
         });
@@ -1013,6 +1031,7 @@ mod tests {
             hwnd: HWND::default(),
             path: path.clone(),
             companion: None,
+            isolated_ha: true,
             mode,
             agent: None,
             chooser: None,
@@ -1030,6 +1049,10 @@ mod tests {
         assert!(matches!(&app.mode, Mode::Running(r) if r.config.is_ha() && r.service().is_some()));
         app.follow_agent();
         assert!(matches!(&app.mode, Mode::Running(r) if matches!(r.feed, Feed::Direct(_))));
+        settings::save(&path, &serde_json::json!({"energySource":{"type":"mock"}}), &TraySettings::default()).unwrap();
+        app.reload();
+        assert!(matches!(&app.mode, Mode::Broken(_)), "isolated reload cannot switch to legacy or simulation");
+        assert!(app.agent.is_none() && app.chooser.is_none());
         drop(app);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();

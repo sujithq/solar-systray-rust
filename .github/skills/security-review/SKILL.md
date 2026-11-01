@@ -27,6 +27,9 @@ description: Security checks for JSON configuration, DSMR telegrams, Sungrow Mod
   - Deserialize into typed data, validate addresses before showing them, and keep error text short and single-line.
   - Cover changes with the fake-server tests in `crates/solar-core/tests/agent.rs`.
 - Home Assistant client:
+  - Native `SOLAR_SYSTRAY_HA_CONFIG` overrides must require an existing absolute file
+    and explicit atomic HA mode on startup and reload. Never seed a missing override,
+    change the primary settings, or expose autostart changes in isolated monitoring.
   - Require ws/wss IP endpoints on `/api/websocket`; reject embedded credentials, queries, fragments and control characters. Never follow redirects or disable TLS certificate validation.
   - Store only a validated environment-variable reference in configuration. Never expose the token or server-provided auth/error text, including through Debug or notifications.
   - Preserve connect, upgrade/TLS byte budget/deadline, read/write, command and heartbeat deadlines, cancellation slices, message/frame limits, aggregate initialization-buffer limits and bounded reconnect backoff.

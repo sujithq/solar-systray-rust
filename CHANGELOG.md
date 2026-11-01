@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Isolated native HA monitoring via an existing absolute
+  `SOLAR_SYSTRAY_HA_CONFIG` file, with HA-only atomic startup/reload validation,
+  no primary settings seeding and no autostart changes.
+
 - Opt-in bounded HA-only monitoring harness with sanitized acceptance reporting,
   client-only stale/recovery checks and unchanged 30-second/300-second safety limits.
   Reports include sampled error/reconnect and decision-predicate diagnostics;

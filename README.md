@@ -326,6 +326,16 @@ Settings live in `%LOCALAPPDATA%\Solar Systray\config.json`. On first run the ap
   their meter, inverter, threshold, location and appliance settings are copied.
 - Otherwise it starts in **simulation mode** with default settings, so you can try it out.
 
+For an isolated HA monitoring instance, set the process-only
+`SOLAR_SYSTRAY_HA_CONFIG` environment variable to an **existing absolute** config
+file path before launching. This override requires explicit `home-assistant` mode
+and a nonempty `atomicGrid`; it never seeds from Solar Agent or defaults, and
+rejects non-HA settings on reload. Tray preference edits affect only this file.
+Autostart is unavailable in this instance. The normal single-instance rule still
+applies: exit another tray instance yourself first. Keep the existing HA token in
+the configured process environment reference, never in the JSON. This is a config
+override, not proof of native UI or live surplus acceptance.
+
 Edit the file with **Open config file**, then choose **Reload config**. If the file is
 invalid, the icon turns grey with a warning dot and the menu shows the error.
 
