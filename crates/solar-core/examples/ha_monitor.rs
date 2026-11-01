@@ -1,9 +1,85 @@
 //! Opt-in live acceptance; launched privately with an existing process credential.
 
 use serde_json::json;
+use solar_core::decision::State;
 use solar_core::{SolarConfig, SolarService};
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct Continuity {
+    since: Option<Duration>,
+    previous: Option<Duration>,
+    longest: Duration,
+}
+
+impl Continuity {
+    fn observe(&mut self, now: Duration, eligible: bool) {
+        if self.previous.is_some_and(|previous| now.saturating_sub(previous) > Duration::from_millis(500)) {
+            self.since = None;
+        }
+        self.previous = Some(now);
+        if eligible {
+            let since = *self.since.get_or_insert(now);
+            self.longest = self.longest.max(now.saturating_sub(since));
+        } else {
+            self.since = None;
+        }
+    }
+}
+
+fn client_code(code: Option<&str>) -> &'static str {
+    match code {
+        Some("ha-atomic-time") => "ha-atomic-time",
+        Some("ha-atomic-schema") => "ha-atomic-schema",
+        Some("ha-atomic-power") => "ha-atomic-power",
+        Some("ha-atomic-replay") => "ha-atomic-replay",
+        Some("ha-atomic-retired-session") => "ha-atomic-retired-session",
+        Some("ha-atomic-session-limit") => "ha-atomic-session-limit",
+        Some("ha-atomic-unavailable") => "ha-atomic-unavailable",
+        Some("ha-atomic-stale") => "ha-atomic-stale",
+        Some("ha-atomic-future") => "ha-atomic-future",
+        Some("ha-awaiting-new-atomic-sample") => "ha-awaiting-new-atomic-sample",
+        Some("ha-awaiting-initialization") => "ha-awaiting-initialization",
+        Some("ha-response-timeout") => "ha-response-timeout",
+        Some("ha-read-or-protocol") => "ha-read-or-protocol",
+        Some("ha-connect") => "ha-connect",
+        Some("ha-upgrade-or-tls") => "ha-upgrade-or-tls",
+        Some("ha-auth-rejected") => "ha-auth-rejected",
+        Some("ha-token-missing") => "ha-token-missing",
+        Some("ha-token-invalid") => "ha-token-invalid",
+        Some("ha-closed") => "ha-closed",
+        Some("ha-json") => "ha-json",
+        Some("ha-unexpected-response") => "ha-unexpected-response",
+        Some("ha-subscription-rejected") => "ha-subscription-rejected",
+        Some("ha-snapshot-rejected") => "ha-snapshot-rejected",
+        Some("ha-snapshot-shape") => "ha-snapshot-shape",
+        Some("ha-event-shape") => "ha-event-shape",
+        Some("ha-event-entity") => "ha-event-entity",
+        Some("ha-initialization-overflow") => "ha-initialization-overflow",
+        Some("ha-write") => "ha-write",
+        Some("ha-message-type") => "ha-message-type",
+        Some("ha-timeout") => "ha-timeout",
+        Some("ha-transport") => "ha-transport",
+        Some("ha-disconnected") => "ha-disconnected",
+        None => "no-current-issue",
+        _ => "unclassified-client-code",
+    }
+}
+
+fn predicate(snapshot: &solar_core::Snapshot) -> &'static str {
+    let e = &snapshot.evaluation;
+    match e.state {
+        State::Offline => "unavailable",
+        State::Importing => "grid-import",
+        State::Idle => "no-meaningful-surplus",
+        State::Limited if e.surplus_w.is_some_and(|w| w > e.start_threshold_w) => "waiting-stability",
+        State::Limited => "insufficient-surplus",
+        State::Good | State::Excellent if e.safe_to_start => "go",
+        _ => "other-existing-predicate",
+    }
+}
 
 fn main() {
     if std::env::var("SOLAR_HA_MONITOR_APPROVED").as_deref() != Ok("1") {
@@ -38,12 +114,36 @@ fn main() {
     let mut initialized = false;
     let mut protocol_errors = 0;
     let mut expired_go = false;
+    let mut fresh_continuity = Continuity::default();
+    let mut candidate_continuity = Continuity::default();
+    let mut issue_observations = BTreeMap::<&str, u64>::new();
+    let mut error_deltas = BTreeMap::<&str, u64>::new();
+    let mut predicates = BTreeMap::<&str, u64>::new();
+    let mut reconnects = 0;
+    let mut max_stable_seconds = 0.0_f64;
     eprintln!("Monitoring HA-only atomic samples for 310 seconds; no device controls.");
     while started.elapsed() < Duration::from_secs(310) {
         let snapshot = service.snapshot();
         let ha = snapshot.home_assistant.as_ref().expect("HA diagnostics");
         initialized |= ha.initialized;
+        let code = client_code(snapshot.diagnostics.last_issue.as_deref());
+        *issue_observations.entry(code).or_default() += 1;
+        let delta = snapshot.diagnostics.errors.saturating_sub(protocol_errors);
+        if delta > 0 {
+            *error_deltas.entry(code).or_default() += delta;
+        }
         protocol_errors = snapshot.diagnostics.errors;
+        reconnects = snapshot.diagnostics.reconnects;
+        let category = predicate(&snapshot);
+        *predicates.entry(category).or_default() += 1;
+        let fresh = snapshot.reading_at.is_some()
+            && ha
+                .entities
+                .first()
+                .is_some_and(|e| e.issue.is_none() && e.age_ms.is_some_and(|age| (0..30_000).contains(&age)));
+        fresh_continuity.observe(started.elapsed(), fresh);
+        candidate_continuity.observe(started.elapsed(), fresh && matches!(category, "waiting-stability" | "go"));
+        max_stable_seconds = max_stable_seconds.max(snapshot.evaluation.stable_seconds);
         go_observed |= snapshot.evaluation.safe_to_start;
         if snapshot.evaluation.safe_to_start && snapshot.evaluation.stable_seconds < 300.0 {
             unsafe_go += 1;
@@ -106,6 +206,7 @@ fn main() {
     let passed = initialized
         && readings > 1
         && span >= 300
+        && fresh_continuity.longest >= Duration::from_secs(300)
         && unchanged > 0
         && stale_cleared
         && recovery_live
@@ -126,6 +227,16 @@ fn main() {
             "unchanged_power_new_sequences": unchanged,
             "unavailable_observations": missing,
             "protocol_errors": protocol_errors,
+            "client_errors": protocol_errors,
+            "reconnect_count": reconnects,
+            "issue_poll_observations": issue_observations,
+            "error_deltas_by_latest_observed_code": error_deltas,
+            "error_attribution": "poll-sampled latest client code; intermediate errors can be coalesced or superseded",
+            "decision_predicate_poll_observations": predicates,
+            "longest_observed_continuous_fresh_seconds": fresh_continuity.longest.as_secs_f64(),
+            "longest_observed_continuous_candidate_seconds": candidate_continuity.longest.as_secs_f64(),
+            "maximum_engine_stable_seconds": max_stable_seconds,
+            "continuity_evidence": "200ms polls; gaps over500ms reset continuity; not proof of unsampled transitions",
             "go_observed_under_existing_predicates": go_observed,
             "unsafe_go_observations": unsafe_go,
             "client_stop_stale_cleared": stale_cleared,
@@ -140,5 +251,33 @@ fn main() {
     );
     if !passed {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuity_requires_unbroken_eligible_polls_and_bounds_observation_gaps() {
+        let mut c = Continuity::default();
+        for ms in [0, 200, 400] {
+            c.observe(Duration::from_millis(ms), true);
+        }
+        assert_eq!(c.longest, Duration::from_millis(400));
+        c.observe(Duration::from_millis(600), false);
+        c.observe(Duration::from_millis(800), true);
+        c.observe(Duration::from_millis(1000), true);
+        assert_eq!(c.longest, Duration::from_millis(400));
+        c.observe(Duration::from_millis(2000), true);
+        c.observe(Duration::from_millis(2200), true);
+        assert_eq!(c.longest, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn diagnostic_codes_never_echo_unknown_text() {
+        assert_eq!(client_code(Some("ha-atomic-time")), "ha-atomic-time");
+        assert_eq!(client_code(Some("private-token-or-server-message")), "unclassified-client-code");
+        assert_eq!(client_code(None), "no-current-issue");
     }
 }

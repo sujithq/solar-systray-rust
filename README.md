@@ -254,6 +254,15 @@ for a 31-second stale check, then starts a new client for 15 seconds to check
 recovery/stability reset. It never changes HA, appliances or meter acquisition.
 Output is a sanitized JSON report of durations/counts and safety outcomes, not
 power readings, absolute timestamps, sessions, tokens or device identifiers.
+It includes reconnect counts, allowlisted client-code/predicate polling histograms,
+longest observed continuous fresh/candidate intervals and maximum engine stability.
+`protocol_errors` is retained for old report readers but means aggregate client
+errors, including validation failures; `client_errors` names it accurately.
+Error deltas are attributed to the latest polled code, not an exact event log:
+intermediate errors can be coalesced or superseded. Continuity is sampled every
+200 ms and resets on gaps over 500 ms; it cannot prove unsampled transitions.
+Acceptance requires at least 300 seconds of observed continuous freshness, not
+merely 300 seconds between the first and last accepted samples.
 Exit zero means these bounded acceptance checks passed; nonzero means incomplete
 or failed acceptance. GO is not forced or required when existing predicates
 (for example grid import) prevent it. Synthetic tests are not live acceptance.

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in bounded HA-only monitoring harness with sanitized acceptance reporting,
   client-only stale/recovery checks and unchanged 30-second/300-second safety limits.
+  Reports include sampled error/reconnect and decision-predicate diagnostics;
+  acceptance requires 300 seconds of observed continuous freshness.
 
 - Explicit Home Assistant WebSocket-only source with independent authentication,
   race-safe subscription/snapshot initialization, bounded reconnects, per-entity
