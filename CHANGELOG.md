@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in bounded HA-only monitoring harness with sanitized acceptance reporting,
+  client-only stale/recovery checks and unchanged 30-second/300-second safety limits.
+
 - Explicit Home Assistant WebSocket-only source with independent authentication,
   race-safe subscription/snapshot initialization, bounded reconnects, per-entity
   diagnostics and fail-safe provisional freshness. HA mode bypasses Solar Agent

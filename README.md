@@ -239,6 +239,25 @@ Live freshness UI validation failed previously; daytime PV/sign/topology checks
 and real update cadence remain pending. This implementation and its synthetic
 tests do not constitute device validation or authorize deployment/cutover.
 
+### Opt-in monitoring acceptance harness
+
+`cargo build -p solar-core --example ha_monitor` builds a bounded, monitoring-only
+provider harness. It requires an existing token in the launched process's
+`SOLAR_HA_TOKEN` and `SOLAR_HA_MONITOR_APPROVED=1`; never put a token in a command,
+repository file or chat. A private local launcher can prompt with hidden input,
+pass the credential process-locally and clear it afterward. This is not persistent
+credential storage or a token-creation flow.
+
+The harness uses only the loopback HA WebSocket and explicit atomic entity,
+with direct readers disabled. It observes 310 seconds, stops only its own client
+for a 31-second stale check, then starts a new client for 15 seconds to check
+recovery/stability reset. It never changes HA, appliances or meter acquisition.
+Output is a sanitized JSON report of durations/counts and safety outcomes, not
+power readings, absolute timestamps, sessions, tokens or device identifiers.
+Exit zero means these bounded acceptance checks passed; nonzero means incomplete
+or failed acceptance. GO is not forced or required when existing predicates
+(for example grid import) prevent it. Synthetic tests are not live acceptance.
+
 ### Legacy source selection
 
 A SlimmeLezer does not reliably serve two clients: with two connections open, one of them
