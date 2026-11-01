@@ -177,16 +177,25 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         vec![row("Grid export", "-- W", Tone::Muted), row("Grid import", "-- W", Tone::Muted)]
     };
     let inverter = &s.inverter;
-    match (inverter.status, inverter.pv_power_w) {
-        (InverterStatus::Disabled, _) => {}
-        (InverterStatus::Online, Some(pv)) => {
-            rows.push(row("Solar panels (PV)", kilowatts(pv), Tone::Text));
-            if let Some(ac) = inverter.active_power_w {
-                rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text));
-            }
+    if s.home_assistant.is_some() {
+        match (inverter.status, inverter.active_power_w) {
+            (InverterStatus::Online, Some(ac)) => rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text)),
+            (InverterStatus::Disabled, _) => rows.push(row("Inverter output (AC)", "Not mapped", Tone::Muted)),
+            _ => rows.push(row("Inverter output (AC)", "Unavailable or stale", Tone::Warn)),
         }
-        (InverterStatus::Standby, _) => rows.push(row("Solar panels (PV)", "No reading (night)", Tone::Muted)),
-        _ => rows.push(row("Solar panels (PV)", "Sungrow unavailable", Tone::Warn)),
+        rows.push(row("Household use", "Unavailable (AC topology/sign unverified)", Tone::Muted));
+    } else {
+        match (inverter.status, inverter.pv_power_w) {
+            (InverterStatus::Disabled, _) => {}
+            (InverterStatus::Online, Some(pv)) => {
+                rows.push(row("Solar panels (PV)", kilowatts(pv), Tone::Text));
+                if let Some(ac) = inverter.active_power_w {
+                    rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text));
+                }
+            }
+            (InverterStatus::Standby, _) => rows.push(row("Solar panels (PV)", "No reading (night)", Tone::Muted)),
+            _ => rows.push(row("Solar panels (PV)", "Sungrow unavailable", Tone::Warn)),
+        }
     }
     let household = inverter.household_use_w.filter(|w| w.is_finite());
     if let Some(household) = household {
@@ -220,6 +229,9 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn peak_rows(s: &Snapshot) -> Vec<Row> {
+    if s.home_assistant.is_some() {
+        return vec![row("Forecast", "Unavailable (HA meter clock/demand/peak not mapped)", Tone::Muted)];
+    }
     let e = &s.evaluation;
     let mut rows = Vec::new();
     if live(s)
@@ -261,6 +273,9 @@ fn peak_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn today_rows(s: &Snapshot) -> Vec<Row> {
+    if s.home_assistant.is_some() {
+        return vec![row("Daily energy", "Unavailable (HA meter clock/counters not mapped)", Tone::Muted)];
+    }
     let d = &s.daily_energy;
     match (live(s) && d.available, d.import_wh, d.export_wh, d.since_minute) {
         (true, Some(import), Some(export), Some(since)) => vec![
@@ -280,6 +295,31 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
 
 fn connection_rows(s: &Snapshot) -> Vec<Row> {
     let mut rows = vec![row("Sun", format!("Sunrise {} | Sunset {}", clock(s.sunrise), clock(s.sunset)), Tone::Muted)];
+    if let Some(ha) = &s.home_assistant {
+        rows.push(row("Source", "Home Assistant (WebSocket only; no fallback)", Tone::Text));
+        rows.push(row(
+            "HA transport",
+            if ha.connected { "Authenticated" } else { "Disconnected" },
+            if ha.connected { Tone::Good } else { Tone::Bad },
+        ));
+        rows.push(row(
+            "Initialization",
+            if ha.initialized { "Subscribed and initialized" } else { "Awaiting auth/subscription/snapshot" },
+            Tone::Muted,
+        ));
+        rows.push(row("Evidence", &ha.evidence, Tone::Warn));
+        if let Some(issue) = &s.diagnostics.last_issue {
+            rows.push(row("Grid status", issue, Tone::Warn));
+        }
+        for entity in &ha.entities {
+            let value = entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
+                Some(ms) => format!("HA-change age {:.1}s", ms as f64 / 1000.0),
+                None => "Unavailable".into(),
+            });
+            rows.push(row(&entity.entity, value, if entity.issue.is_some() { Tone::Warn } else { Tone::Muted }));
+        }
+        return rows;
+    }
     match &s.meter_address {
         None => rows.push(row("Meter", "Simulated", Tone::Muted)),
         Some(address) => {

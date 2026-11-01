@@ -227,6 +227,22 @@ mod tests {
     }
 
     #[test]
+    fn ha_settings_preserve_credential_reference_and_companion_compatibility() {
+        let solar = json!({"energySource":{"type":"home-assistant"},
+            "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3}});
+        let text = render(&solar, &TraySettings::default());
+        let (saved, config, _) = parse(&text).unwrap();
+        assert!(config.is_ha());
+        assert_eq!(saved, solar);
+        assert_eq!(config.home_assistant.token_env, "SOLAR_HA_TOKEN");
+        assert_eq!(config.home_assistant.grid_skew_seconds, 3.0);
+        let companion = json!({"mode":"solar","solar":solar}).to_string();
+        let seeded = seed_from_companion(&companion).unwrap();
+        assert!(SolarConfig::from_json(&seeded).unwrap().is_ha());
+        assert_eq!(seeded["homeAssistant"]["tokenEnv"], "SOLAR_HA_TOKEN");
+    }
+
+    #[test]
     fn tray_settings_parse_from_camel_case() {
         let text = r#"{"solar": {"energySource": {"type": "slimmelezer", "host": "192.0.2.50"}},
             "tray": {"iconStyle": "power", "appliance": "heatPumpDryer",

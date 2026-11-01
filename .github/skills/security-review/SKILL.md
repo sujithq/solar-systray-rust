@@ -12,6 +12,7 @@ description: Security checks for JSON configuration, DSMR telegrams, Sungrow Mod
 - `crates/solar-core/src/dsmr.rs` frames and parses meter telegrams; the stream is size- and age-bounded, and readings require a verified CRC unless legacy mode is explicitly enabled.
 - `crates/solar-core/src/sungrow.rs` reads Modbus TCP responses and checks transaction, unit, length, and power ranges before returning measurements.
 - `crates/solar-core/src/agent.rs` reads Solar Agent's settings info file (port and access token) and talks HTTP to its local service. Both the file and every HTTP response are untrusted: any local process could write the file or listen on the port.
+- `crates/solar-core/src/home_assistant.rs` validates HA endpoint/credential references and consumes untrusted WebSocket auth, snapshot and state events. HA mode in `service.rs` and `solar-tray/src/app.rs` must never create Agent or hardware fallback readers.
 
 ## Before merging a change to these paths
 
@@ -25,3 +26,11 @@ description: Security checks for JSON configuration, DSMR telegrams, Sungrow Mod
   - Keep strict HTTP framing: reject conflicting `Content-Length`, unknown `Transfer-Encoding`, and `Content-Length` combined with chunked.
   - Deserialize into typed data, validate addresses before showing them, and keep error text short and single-line.
   - Cover changes with the fake-server tests in `crates/solar-core/tests/agent.rs`.
+- Home Assistant client:
+  - Require ws/wss IP endpoints on `/api/websocket`; reject embedded credentials, queries, fragments and control characters. Never follow redirects or disable TLS certificate validation.
+  - Store only a validated environment-variable reference in configuration. Never expose the token or server-provided auth/error text, including through Debug or notifications.
+  - Preserve connect, upgrade/TLS byte budget/deadline, read/write, command and heartbeat deadlines, cancellation slices, message/frame limits, aggregate initialization-buffer limits and bounded reconnect backoff.
+  - Subscribe before requesting the WebSocket snapshot; correlate IDs, validate event entity identity and do not apply buffered events older than the snapshot.
+  - Validate units, finite/ranged power and source timestamps before using values. Maintain independent grid/AC ages and bounded grid skew; invalid optional AC never invalidates valid grid.
+  - Snapshots/reconnects, repeated numeric states, attributes, heartbeats and unrelated entities cannot renew evidence or restore GO. Source value changes remain explicitly provisional, not verified physical acquisition.
+  - Preserve no-fallback startup/reload/tick routing, gated daily/quarter-hour features and unverified household derivations. Cover protocol failures/reconnects with `crates/solar-core/tests/home_assistant.rs` and HA settings/source-selection/native-smoke tests.

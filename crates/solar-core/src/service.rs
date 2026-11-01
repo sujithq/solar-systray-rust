@@ -20,7 +20,7 @@ pub struct SolarService {
     stop: Arc<AtomicBool>,
 }
 
-fn lock(runtime: &Mutex<Runtime>) -> MutexGuard<'_, Runtime> {
+pub(crate) fn lock(runtime: &Mutex<Runtime>) -> MutexGuard<'_, Runtime> {
     runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -40,6 +40,7 @@ pub(crate) fn pause(stop: &AtomicBool, duration: Duration) -> bool {
 impl SolarService {
     pub fn start(config: SolarConfig) -> Self {
         let mock = config.is_mock();
+        let ha = config.is_ha().then(|| config.home_assistant.clone());
         let inverter = config.inverter_enabled().then(|| config.inverter_source.clone());
         let source = (config.energy_source.host.clone(), config.energy_source.port);
         let runtime = Arc::new(Mutex::new(Runtime::new(config)));
@@ -49,7 +50,9 @@ impl SolarService {
         };
         {
             let (runtime, stop) = (runtime.clone(), stop.clone());
-            if mock {
+            if let Some(ha) = ha {
+                spawn("solar-ha", Box::new(move || crate::home_assistant::worker(&runtime, &stop, &ha)));
+            } else if mock {
                 spawn("solar-simulator", Box::new(move || simulator(&runtime, &stop)));
             } else {
                 spawn("solar-meter", Box::new(move || meter(&runtime, &stop, &source.0, source.1)));
@@ -82,7 +85,8 @@ impl SolarService {
         lock(&self.runtime).set_simulated_watts(watts, now_ms())
     }
 
-    /// Signals the threads to stop; they exit within about a second without being joined.
+    /// Signals workers to stop without joining. Reads wake in 500 ms; a pending
+    /// HA connect/upgrade can take its bounded connect/handshake deadline to exit.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }

@@ -17,9 +17,10 @@ information as [Solar Agent](https://github.com/madebyq/solar-agent): whether it
 moment to start a big appliance, what the grid is doing right now, and whether this
 quarter-hour is about to set a new monthly peak. Everything is written in Rust.
 
-It runs in the background as one small executable (about 0.6 MB) with no runtime to install.
-When Solar Agent is running it shows Solar Agent's data; otherwise it reads the meter itself,
-so Solar Agent does not need to be running. See [Where the data comes from](#where-the-data-comes-from).
+It runs in the background as one small executable (about 1.1 MB) with no runtime to install.
+Explicit Home Assistant mode uses HA WebSockets only. In legacy modes, when Solar Agent
+is running it shows Solar Agent's data; otherwise it reads the meter itself, so Solar Agent
+does not need to be running. See [Where the data comes from](#where-the-data-comes-from).
 
 ## What it shows
 
@@ -84,6 +85,101 @@ notifications, so Do not disturb applies to them.
 When simulating, the titles start with `[SIM]`.
 
 ## Where the data comes from
+
+**Explicit Home Assistant mode** (`solar.energySource.type: "home-assistant"`) is
+independent of the legacy chooser described below. HA is the sole hardware reader;
+the tray authenticates directly to HA's `/api/websocket` and runs its own existing
+decision engine and appliance controls. It starts no Solar Agent client, meter
+link or inverter poller, including after settings reload and during reconnects.
+There is **no REST, Solar Agent API or direct-device fallback** when HA is unavailable.
+Connections shows `Read by Home Assistant`, transport/initialization state,
+per-entity evidence ages and sanitized failure codes.
+
+The first implementation uses the standard WebSocket `subscribe_events`
+(`state_changed`) command followed by WebSocket `get_states`. Subscribing before
+the snapshot, buffering relevant events and discarding events older than that
+snapshot avoids the initialization race. This deliberately uses full-state
+messages rather than `subscribe_entities`' compressed deltas so timestamp and
+unit validation use one representation. Commands, messages, initialization,
+heartbeat responses and reconnect backoff are bounded. Each reconnect reauthenticates
+and resubscribes; it discards eligible readings and resets GO stability.
+
+### HA configuration and acceptance limits
+
+Merge these sections into the `solar` object of your existing config:
+
+```json
+{
+  "energySource": { "type": "home-assistant" },
+  "homeAssistant": {
+    "endpoint": "ws://127.0.0.1:8123/api/websocket",
+    "tokenEnv": "SOLAR_HA_TOKEN",
+    "gridImport": "sensor.electricity_meter_power_consumption",
+    "gridExport": "sensor.electricity_meter_power_production",
+    "activePower": "",
+    "inverterStaleSeconds": 90,
+    "gridSkewSeconds": 5
+  },
+  "decision": { "staleAfterSeconds": 30 }
+}
+```
+
+`tokenEnv` names a process environment variable containing an **existing** HA token;
+the credential itself is never written to the config, logs, diagnostics or error
+messages. Provision it privately to the launched process using your credential
+manager/launcher, not a source-controlled file or shared command. This change
+does not create credentials or configure Windows to persist them.
+
+The endpoint must use an IP literal and the exact `/api/websocket` path, without
+credentials, queries or fragments. IP-only addressing avoids unbounded OS DNS
+resolution; hostname URLs are not supported in this slice. Use `wss` with a
+trusted certificate valid for that IP across untrusted networks. `ws` transmits
+the token unencrypted and is appropriate only on a trusted local transport.
+TLS validation is never disabled, and redirects are not followed.
+
+Import/export are independently nonnegative **kW** values, multiplied by 1000
+to watts; net import is import minus export. Both members must be valid and
+independently younger than `decision.staleAfterSeconds` (default **30 s**), with
+sample skew at most `gridSkewSeconds` (default **5 s**, configurable 0-30 s).
+A coherent pair advances the decision sample only when a member has a newer
+accepted value change, never from unrelated entities or display refreshes.
+Optional `activePower` may map to `sensor.sg5_0rs_local_total_active_power` in **W**;
+it expires independently after `inverterStaleSeconds` (default **90 s**).
+Leaving it empty disables AC. Invalid/unavailable AC affects AC display only,
+not otherwise valid grid decisions.
+
+**Measurement correctness is a user working assumption, not live verification.**
+Diagnostics label HA value-change times as provisional evidence, preserve HA
+`last_changed`/`last_updated`/`last_reported` separately, and track receive age
+with a monotonic clock. The snapshot alone cannot enable recommendations:
+each required entity must supply new live value-change evidence after connection.
+Equal numeric states, attribute-only updates, cached reconnect snapshots and
+heartbeats retain the original evidence time and eventually expire. A steady
+zero is not acquisition evidence. This is deliberately fail-safe: a sustained
+zero import/export may prevent GO, and the default 300-second stability interval
+cannot be earned from unchanged entities under the provisional 30-second limit.
+Do not increase stale limits or shorten stability merely to hide this limitation;
+live acceptance must establish a trustworthy unchanged-reading acquisition signal
+before enabling such measurements to renew eligibility.
+
+Missing/removed entities, `unknown`, `unavailable`, malformed values/timestamps,
+wrong units, negative grid power, future/out-of-order samples, stale data and
+incoherent pairs clear recommendations. Transport/authentication failures clear
+them immediately; recovery must earn a new stability interval. The existing
+offline/recovery notification preferences remain available.
+
+AC is not PV/DC. This slice does **not** map DC power, Sungrow yield counters,
+connectivity or operating state, nor derive household use from unverified AC
+topology/signs. Daily energy and quarter-hour demand/monthly-peak/forecast features
+remain explicitly unavailable until meter clocks, counters, demand, peak and
+calendar/timezone mappings are established. No instantaneous-power or inverter-yield
+approximation substitutes for them.
+
+Live freshness UI validation failed previously; daytime PV/sign/topology checks
+and real update cadence remain pending. This implementation and its synthetic
+tests do not constitute device validation or authorize deployment/cutover.
+
+### Legacy source selection
 
 A SlimmeLezer does not reliably serve two clients: with two connections open, one of them
 stops receiving telegrams. So the app prefers Solar Agent's status instead of keeping a

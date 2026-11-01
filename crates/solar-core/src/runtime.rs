@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 pub enum Meter {
     Mock(MockProvider),
     SlimmeLezer(SlimmeLezer),
+    HomeAssistant(Box<crate::home_assistant::HaState>),
 }
 
 /// What the tray shows. It deserializes from a Solar Agent snapshot too; that has no
@@ -37,6 +38,8 @@ pub struct Snapshot {
     pub sunrise: Option<i64>,
     pub sunset: Option<i64>,
     pub diagnostics: MeterStats,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_assistant: Option<crate::home_assistant::HaDiagnostics>,
     pub meter_address: Option<String>,
     pub inverter_address: Option<String>,
     pub inverter: InverterSnapshot,
@@ -71,7 +74,9 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(config: SolarConfig) -> Self {
-        let meter = if config.is_mock() {
+        let meter = if config.is_ha() {
+            Meter::HomeAssistant(Box::new(crate::home_assistant::HaState::new(config.home_assistant.clone())))
+        } else if config.is_mock() {
             Meter::Mock(MockProvider::new())
         } else {
             Meter::SlimmeLezer(SlimmeLezer::new(config.energy_source.allow_legacy_without_crc))
@@ -99,7 +104,7 @@ impl Runtime {
     fn mock(&self) -> Option<&MockProvider> {
         match &self.meter {
             Meter::Mock(mock) => Some(mock),
-            Meter::SlimmeLezer(_) => None,
+            Meter::SlimmeLezer(_) | Meter::HomeAssistant(_) => None,
         }
     }
 
@@ -114,6 +119,41 @@ impl Runtime {
     pub fn invalidate(&mut self) {
         self.engine.reset();
         self.forecaster.reset();
+    }
+
+    pub fn ha_connected(&mut self) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.connected();
+        }
+    }
+
+    pub fn ha_disconnect(&mut self, issue: &str) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.disconnect(issue);
+            self.invalidate();
+        }
+    }
+
+    pub fn ha_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.state(id, value, now);
+            match state.grid(now, self.config.decision.stale_after_seconds) {
+                Some(reading) => self.observe(&reading, now),
+                None => self.invalidate(),
+            }
+        }
+    }
+
+    pub fn ha_ready(&mut self) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.ready();
+        }
+    }
+
+    pub fn ha_snapshot_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.snapshot_state(id, value, now);
+        }
     }
 
     pub fn observe(&mut self, reading: &Reading, now: i64) {
@@ -220,6 +260,9 @@ impl Runtime {
     }
 
     fn inverter_snapshot(&self, now: i64) -> InverterSnapshot {
+        if let Meter::HomeAssistant(state) = &self.meter {
+            return state.inverter(now);
+        }
         let Some(mock) = self.mock() else {
             return self.inverter.snapshot(self.config.inverter_enabled(), now);
         };
@@ -249,7 +292,7 @@ impl Runtime {
         sun: Sun,
         inverter: &InverterSnapshot,
     ) -> Option<f64> {
-        let reading = reading.filter(|_| fresh && !self.config.is_mock())?;
+        let reading = reading.filter(|_| fresh && !self.config.is_mock() && !self.config.is_ha())?;
         if sun == Sun::Down {
             return Some(reading.grid_import_w);
         }
@@ -264,6 +307,7 @@ impl Runtime {
     pub fn snapshot(&mut self, now: i64) -> Snapshot {
         let reading = match &mut self.meter {
             Meter::Mock(mock) => mock.latest().cloned(),
+            Meter::HomeAssistant(state) => state.grid(now, self.config.decision.stale_after_seconds),
             Meter::SlimmeLezer(link) => {
                 let (reading, events) = link.latest(now);
                 self.dispatch(events, now);
@@ -293,6 +337,7 @@ impl Runtime {
         let diagnostics = match &self.meter {
             Meter::Mock(_) => MeterStats { simulated: true, ..MeterStats::default() },
             Meter::SlimmeLezer(link) => link.stats().clone(),
+            Meter::HomeAssistant(state) => state.stats.clone(),
         };
         let presets = if mock.is_some() {
             simulation_presets(&self.config.decision, &self.config.appliances[&evaluation.appliance])
@@ -311,8 +356,16 @@ impl Runtime {
             sunrise: times.sunrise,
             sunset: times.sunset,
             diagnostics,
-            meter_address: (!self.config.is_mock())
-                .then(|| format!("{}:{}", self.config.energy_source.host, self.config.energy_source.port)),
+            home_assistant: match &self.meter {
+                Meter::HomeAssistant(state) => Some(state.diagnostics(now, self.config.decision.stale_after_seconds)),
+                _ => None,
+            },
+            meter_address: if self.config.is_ha() {
+                Some("Home Assistant".into())
+            } else {
+                (!self.config.is_mock())
+                    .then(|| format!("{}:{}", self.config.energy_source.host, self.config.energy_source.port))
+            },
             inverter_address: self
                 .config
                 .inverter_enabled()

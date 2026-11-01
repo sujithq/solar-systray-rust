@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Explicit Home Assistant WebSocket-only source with independent authentication,
+  race-safe subscription/snapshot initialization, bounded reconnects, per-entity
+  diagnostics and fail-safe provisional freshness. HA mode bypasses Solar Agent
+  and all direct hardware readers at startup, reload and every tick.
+- Configurable grid import/export mappings (kW to W), optional distinct AC display,
+  preserved 30-second meter/90-second inverter defaults and bounded grid skew.
+  Cached/unchanged states cannot renew recommendations; daily/quarter-hour and
+  unverified household derivations are explicitly unavailable pending live acceptance.
+
 ## [0.1.0] - 2026-10-30
 
 ### Added

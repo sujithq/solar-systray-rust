@@ -1,6 +1,6 @@
 //! The Win32 side: a hidden window that owns the notification-area icon, its menu and balloons.
-//! Solar data comes from a running Solar Agent ([`AgentLink`]) or, when there is none, from the
-//! tray's own [`SolarService`]; a one-second timer refreshes what is shown.
+//! Explicit HA mode uses a local [`SolarService`] with no legacy readers. Otherwise
+//! data follows [`AgentLink`] or direct devices; a one-second timer refreshes the UI.
 
 use crate::alerts::{Alert, Alerts, Kind};
 use crate::icon::{self, IconSpec};
@@ -126,7 +126,7 @@ enum Action {
 
 /// Where the shown data comes from.
 enum Feed {
-    /// The tray's own meter and inverter connections.
+    /// Local decisions fed by HA only, direct devices, or simulation according to explicit config.
     Direct(SolarService),
     /// Solar Agent's newest answer; the tray opens no device connections.
     Agent(AgentResult),
@@ -168,6 +168,7 @@ fn source_text(running: &Running) -> String {
     match &running.feed {
         Feed::Agent(_) => "your Solar Agent's data".into(),
         Feed::Direct(_) if running.config.is_mock() => "a simulation".into(),
+        Feed::Direct(_) if running.config.is_ha() => "Home Assistant (WebSocket only)".into(),
         Feed::Direct(_) => {
             let source = &running.config.energy_source;
             format!("the SlimmeLezer at {}:{}", source.host, source.port)
@@ -184,15 +185,20 @@ fn start_direct(config: &SolarConfig, tray: &TraySettings) -> SolarService {
     service
 }
 
-/// Loads the config. With `agent` (Solar Agent's answer) the tray shows Solar Agent's data and
-/// opens no connections; otherwise it connects to the meter and inverter itself.
-fn load(path: &Path, companion: Option<&Path>, agent: Option<AgentResult>) -> (Mode, Option<Note>) {
+/// Chooses the source before starting local workers; HA drops legacy links first.
+fn load(
+    path: &Path,
+    companion: Option<&Path>,
+    prepare: impl FnOnce(bool) -> Option<AgentResult>,
+) -> (Mode, Option<Note>) {
     let loaded = match settings::load_or_seed(path, companion) {
         Ok(loaded) => loaded,
         Err(error) => {
             return (Mode::Broken(error.clone()), Some(Note::new("Solar Systray: config error", error, true)));
         }
     };
+    let ha = loaded.solar.is_ha();
+    let agent = prepare(ha).filter(|_| !ha);
     let feed = match agent {
         Some(latest) => Feed::Agent(latest),
         None => Feed::Direct(start_direct(&loaded.solar, &loaded.tray)),
@@ -409,13 +415,37 @@ impl MenuBuilder {
     }
 }
 
+fn start_legacy(
+    base: Option<&Path>,
+    link: &mut Option<AgentLink>,
+    selection: &mut Option<SourceChooser>,
+    ha: bool,
+) -> Option<AgentResult> {
+    if ha {
+        *link = None;
+        *selection = None;
+        return None;
+    }
+    if let (Some(agent), Some(chooser)) = (link.as_ref(), selection.as_ref()) {
+        return (chooser.source() == Source::Agent).then(|| agent.latest());
+    }
+    let info = agent::settings_info_path(std::env::var_os(agent::SETTINGS_INFO_ENV), base);
+    let agent = AgentLink::start(info);
+    let latest = agent.latest();
+    let chooser = SourceChooser::new(&latest);
+    let result = (chooser.source() == Source::Agent).then_some(latest);
+    *link = Some(agent);
+    *selection = Some(chooser);
+    result
+}
+
 struct App {
     hwnd: HWND,
     path: PathBuf,
     companion: Option<PathBuf>,
     mode: Mode,
-    agent: AgentLink,
-    chooser: SourceChooser,
+    agent: Option<AgentLink>,
+    chooser: Option<SourceChooser>,
     started: Instant,
     added: bool,
     icon: Option<(IconSpec, u32, HICON)>,
@@ -452,8 +482,12 @@ impl App {
     /// Takes Solar Agent's newest answer, and switches between its data and the tray's own
     /// connections when Solar Agent starts or has been gone for a while.
     fn follow_agent(&mut self) {
-        let latest = self.agent.latest();
-        let source = self.chooser.update(&latest, self.started.elapsed().as_millis() as i64);
+        if matches!(&self.mode, Mode::Running(r) if r.config.is_ha()) {
+            return;
+        }
+        let (Some(agent), Some(chooser)) = (&self.agent, &mut self.chooser) else { return };
+        let latest = agent.latest();
+        let source = chooser.update(&latest, self.started.elapsed().as_millis() as i64);
         let Mode::Running(running) = &mut self.mode else { return };
         match (&mut running.feed, source) {
             (Feed::Agent(shown), Source::Agent) => *shown = latest,
@@ -647,7 +681,10 @@ impl App {
 
     /// Sends a control to Solar Agent; returns an error message when it is not applied.
     fn tell_agent(&self, control: Control) -> Option<String> {
-        self.agent.control(&control).err().map(|error| error.to_string())
+        match &self.agent {
+            Some(agent) => agent.control(&control).err().map(|error| error.to_string()),
+            None => Some("Solar Agent controls are unavailable in this source mode".into()),
+        }
     }
 
     /// Applies a tray preference and saves it; returns an error message when saving fails.
@@ -662,8 +699,13 @@ impl App {
     fn reload(&mut self) {
         // Stop the old connections before the new ones start.
         self.mode = Mode::Broken(String::new());
-        let agent = (self.chooser.source() == Source::Agent).then(|| self.agent.latest());
-        let (mode, note) = load(&self.path, self.companion.as_deref(), agent);
+        let base = settings::local_app_data();
+        let (mode, note) = load(&self.path, self.companion.as_deref(), |ha| {
+            if !ha && self.agent.is_none() {
+                self.started = Instant::now();
+            }
+            start_legacy(base.as_deref(), &mut self.agent, &mut self.chooser, ha)
+        });
         let note = note.or_else(|| match &mode {
             Mode::Running(running) => {
                 Some(Note::new("Config reloaded", format!("Showing {}.", source_text(running)), false))
@@ -755,7 +797,13 @@ fn snapshot_menu(menu: &mut MenuBuilder, root: HMENU, running: &Running, snapsho
         if let Some(section) = info.section(title) {
             let sub = MenuBuilder::popup();
             if title == "Connections" {
-                let reader = if matches!(running.feed, Feed::Agent(_)) { "Solar Agent" } else { "Solar Systray" };
+                let reader = if running.config.is_ha() {
+                    "Home Assistant"
+                } else if matches!(running.feed, Feed::Agent(_)) {
+                    "Solar Agent"
+                } else {
+                    "Solar Systray"
+                };
                 menu.info(sub, &format!("Read by\t{reader}"));
             }
             for row in &section.rows {
@@ -901,12 +949,10 @@ pub fn run() -> Result<(), String> {
     let hwnd = create_window().map_err(|e| format!("Cannot create the tray window: {}", e.message()))?;
     TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }, Ordering::Relaxed);
 
-    // Ask Solar Agent first, so the tray never opens a second meter connection next to it.
-    let info = agent::settings_info_path(std::env::var_os(agent::SETTINGS_INFO_ENV), Some(&base));
-    let agent = AgentLink::start(info);
-    let latest = agent.latest();
-    let chooser = SourceChooser::new(&latest);
-    let (mode, note) = load(&path, companion.as_deref(), (chooser.source() == Source::Agent).then_some(latest));
+    // Read explicit source mode first; only legacy modes may ask Solar Agent.
+    let mut agent = None;
+    let mut chooser = None;
+    let (mode, note) = load(&path, companion.as_deref(), |ha| start_legacy(Some(&base), &mut agent, &mut chooser, ha));
     let mut app = App {
         hwnd,
         path,
@@ -938,4 +984,54 @@ pub fn run() -> Result<(), String> {
     // Dropping the app removes the icon and stops the background threads.
     APP.with(|cell| cell.borrow_mut().take());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_ha_load_reload_and_source_following_bypass_legacy_selection() {
+        let dir = std::env::temp_dir().join(format!("solar-ha-selection-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        // Missing credential reference prevents any network access in this test.
+        let solar = json!({"energySource":{"type":"home-assistant"},
+            "homeAssistant":{"tokenEnv":"SOLAR_HA_SELECTION_TEST_UNCONFIGURED"}});
+        settings::save(&path, &solar, &TraySettings::default()).unwrap();
+        assert!(std::env::var_os("SOLAR_HA_SELECTION_TEST_UNCONFIGURED").is_none());
+        let mut agent = None;
+        let mut chooser = None;
+        let (mode, _) = load(&path, None, |ha| {
+            assert!(ha);
+            start_legacy(None, &mut agent, &mut chooser, ha)
+        });
+        assert!(agent.is_none() && chooser.is_none());
+        assert!(matches!(&mode, Mode::Running(r) if r.config.is_ha() && r.service().is_some()));
+        let mut app = App {
+            hwnd: HWND::default(),
+            path: path.clone(),
+            companion: None,
+            mode,
+            agent: None,
+            chooser: None,
+            started: Instant::now(),
+            added: false,
+            icon: None,
+            tip: String::new(),
+            notes: VecDeque::new(),
+            active_menu: None,
+        };
+        app.follow_agent();
+        assert!(app.agent.is_none() && app.chooser.is_none());
+        app.reload();
+        assert!(app.agent.is_none() && app.chooser.is_none());
+        assert!(matches!(&app.mode, Mode::Running(r) if r.config.is_ha() && r.service().is_some()));
+        app.follow_agent();
+        assert!(matches!(&app.mode, Mode::Running(r) if matches!(r.feed, Feed::Direct(_))));
+        drop(app);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 }
