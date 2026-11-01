@@ -103,6 +103,10 @@ messages rather than `subscribe_entities`' compressed deltas so timestamp and
 unit validation use one representation. Commands, messages, initialization,
 heartbeat responses and reconnect backoff are bounded. Each reconnect reauthenticates
 and resubscribes; it discards eligible readings and resets GO stability.
+Command IDs strictly increase per connection, including every heartbeat; subscription
+events retain their original subscription ID. Only the pending heartbeat's matching
+pong clears its deadline. Duplicate/unmatched pongs and unexpected results remain
+protocol errors; explicit heartbeat rejection reports `ha-heartbeat-rejected`.
 
 ### HA configuration and acceptance limits
 

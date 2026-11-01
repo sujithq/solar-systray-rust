@@ -492,12 +492,24 @@ fn run_session(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaConfig) -
     if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
         return Err("ha-token-invalid");
     }
+    run_authenticated_session(runtime, stop, config, &token, Duration::from_secs(20))
+}
+
+fn run_authenticated_session(
+    runtime: &Mutex<Runtime>,
+    stop: &AtomicBool,
+    config: &HaConfig,
+    token: &str,
+    ping_interval: Duration,
+) -> Result<(), &'static str> {
     let mut ws = open(config)?;
     let mut phase = 0;
     let mut deadline = Instant::now() + Duration::from_secs(10);
     let mut last_message = Instant::now();
-    let mut next_ping = Instant::now() + Duration::from_secs(20);
+    let mut next_ping = Instant::now() + ping_interval;
     let mut ping_deadline: Option<Instant> = None;
+    let mut next_command_id = 3_u64;
+    let mut pending_ping_id = None;
     let mut buffered: Vec<(String, Value)> = Vec::new();
     let mut buffered_bytes = 0;
     let relevant = |id: &str| {
@@ -514,10 +526,16 @@ fn run_session(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaConfig) -
         {
             return Err("ha-response-timeout");
         }
-        if phase == 4 && Instant::now() >= next_ping {
-            send(&mut ws, json!({"id":3,"type":"ping"}))?;
+        if phase == 4 && pending_ping_id.is_none() && Instant::now() >= next_ping {
+            let id = next_command_id;
+            if id > 9_007_199_254_740_991 {
+                return Err("ha-command-id-exhausted");
+            }
+            next_command_id += 1;
+            send(&mut ws, json!({"id":id,"type":"ping"}))?;
+            pending_ping_id = Some(id);
             ping_deadline = Some(Instant::now() + Duration::from_secs(10));
-            next_ping = Instant::now() + Duration::from_secs(20);
+            next_ping = Instant::now() + ping_interval;
         }
         // A socket timeout alone does not bound a fragmented/trickling frame:
         // force read() to yield so cancellation and total deadlines are checked.
@@ -617,8 +635,14 @@ fn run_session(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaConfig) -
                     }
                 }
             }
-            (4, Some("pong")) if v["id"] == 3 && ping_deadline.is_some() => {
+            (4, Some("pong")) if pending_ping_id.is_some() && v["id"].as_u64() == pending_ping_id => {
+                pending_ping_id = None;
                 ping_deadline = None;
+            }
+            (4, Some("result"))
+                if pending_ping_id.is_some() && v["id"].as_u64() == pending_ping_id && v["success"] == false =>
+            {
+                return Err("ha-heartbeat-rejected");
             }
             _ => return Err("ha-unexpected-response"),
         }
@@ -924,5 +948,164 @@ impl HaState {
 
     pub fn take_atomic_reset(&mut self) -> bool {
         std::mem::take(&mut self.atomic.reset)
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+    use crate::SolarConfig;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    fn write(ws: &mut WebSocket<TcpStream>, value: Value) {
+        ws.send(Message::Text(value.to_string().into())).unwrap();
+    }
+
+    fn read(ws: &mut WebSocket<TcpStream>) -> Value {
+        serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap()
+    }
+
+    // Matches HA ActiveConnection.async_handle: a command ID must be strictly
+    // larger than the last accepted ID; subscription events keep their old ID.
+    fn accept_id(ws: &mut WebSocket<TcpStream>, request: &Value, last: &mut u64) -> bool {
+        let id = request["id"].as_u64().unwrap();
+        if id <= *last {
+            write(
+                ws,
+                json!({"id":id,"type":"result","success":false,
+                "error":{"code":"id_reuse","message":"Identifier values have to increase."}}),
+            );
+            return false;
+        }
+        *last = id;
+        true
+    }
+
+    #[test]
+    fn real_ha_ordering_rejects_old_second_heartbeat() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(socket).unwrap();
+            let mut last = 2;
+            let first = read(&mut ws);
+            assert!(accept_id(&mut ws, &first, &mut last));
+            write(&mut ws, json!({"id":first["id"],"type":"pong"}));
+            let second = read(&mut ws);
+            assert!(!accept_id(&mut ws, &second, &mut last));
+        });
+        let (mut ws, _) =
+            tungstenite::client(format!("ws://{address}/api/websocket"), TcpStream::connect(address).unwrap()).unwrap();
+        write(&mut ws, json!({"id":3,"type":"ping"}));
+        assert_eq!(read(&mut ws), json!({"id":3,"type":"pong"}));
+        write(&mut ws, json!({"id":3,"type":"ping"}));
+        let rejected = read(&mut ws);
+        assert_eq!(rejected["type"], "result");
+        assert_eq!(rejected["error"]["code"], "id_reuse");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn multiple_correlated_heartbeats_preserve_atomic_subscription_and_reject_bad_responses() {
+        for scenario in ["valid", "wrong-pong", "duplicate-pong", "rejected", "unexpected-result"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let config = SolarConfig::from_json(&json!({
+                "energySource":{"type":"home-assistant"},
+                "homeAssistant":{"endpoint":format!("ws://{address}/api/websocket"),"atomicGrid":"sensor.dsmr_atomic_grid_sample"}
+            })).unwrap();
+            let runtime = Arc::new(Mutex::new(Runtime::new(config.clone())));
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = stop.clone();
+            let server_runtime = runtime.clone();
+            let server = std::thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut ws = tungstenite::accept(socket).unwrap();
+                write(&mut ws, json!({"type":"auth_required"}));
+                assert_eq!(read(&mut ws)["type"], "auth");
+                write(&mut ws, json!({"type":"auth_ok"}));
+                let mut last = 0;
+                let subscribe = read(&mut ws);
+                assert!(accept_id(&mut ws, &subscribe, &mut last));
+                assert_eq!(subscribe["id"], 1);
+                write(&mut ws, json!({"id":1,"type":"result","success":true}));
+                let snapshot = read(&mut ws);
+                assert!(accept_id(&mut ws, &snapshot, &mut last));
+                assert_eq!(snapshot["id"], 2);
+                write(&mut ws, json!({"id":2,"type":"result","success":true,"result":[]}));
+                let base = crate::now_ms() - 1000;
+                for n in 0..4 {
+                    let ping = read(&mut ws);
+                    assert_eq!(ping["type"], "ping");
+                    assert!(accept_id(&mut ws, &ping, &mut last), "fixed client reused command ID");
+                    assert_eq!(ping["id"], n + 3);
+                    let id = ping["id"].as_u64().unwrap();
+                    match scenario {
+                        "wrong-pong" => {
+                            write(&mut ws, json!({"id":id+1,"type":"pong"}));
+                            return;
+                        }
+                        "rejected" => {
+                            write(
+                                &mut ws,
+                                json!({"id":id,"type":"result","success":false,
+                            "error":{"message":"untrusted server text"}}),
+                            );
+                            return;
+                        }
+                        "unexpected-result" => {
+                            write(&mut ws, json!({"id":id,"type":"result","success":true}));
+                            return;
+                        }
+                        _ => {}
+                    }
+                    // Interleaved subscription event still uses ID1, with new
+                    // acquisition sequence even though both powers stay zero.
+                    let at = chrono::DateTime::from_timestamp_millis(base + n * 100).unwrap().to_rfc3339();
+                    write(
+                        &mut ws,
+                        json!({"id":1,"type":"event","event":{"event_type":"state_changed",
+                        "data":{"entity_id":"sensor.dsmr_atomic_grid_sample","new_state":{
+                            "entity_id":"sensor.dsmr_atomic_grid_sample","state":(n+1).to_string(),
+                            "attributes":{"schema_version":1,"session":"synthetic-heartbeat",
+                                "sample_sequence":n+1,"meter_timestamp":at,"received_at":at,
+                                "import_w":0,"export_w":0}}}}}),
+                    );
+                    write(&mut ws, json!({"id":id,"type":"pong"}));
+                    if scenario == "duplicate-pong" {
+                        write(&mut ws, json!({"id":id,"type":"pong"}));
+                        return;
+                    }
+                }
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    let s = lock(&server_runtime).snapshot(crate::now_ms());
+                    if s.home_assistant.as_ref().unwrap().entities[0].sample_sequence == Some(4) {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(lock(&server_runtime).snapshot(crate::now_ms()).reading_at.is_some());
+                server_stop.store(true, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(600));
+            });
+            let result = run_authenticated_session(
+                &runtime,
+                &stop,
+                &config.home_assistant,
+                "synthetic-token",
+                Duration::from_millis(60),
+            );
+            match scenario {
+                "valid" => assert_eq!(result, Ok(())),
+                "rejected" => assert_eq!(result, Err("ha-heartbeat-rejected")),
+                _ => assert_eq!(result, Err("ha-unexpected-response")),
+            }
+            server.join().unwrap();
+        }
     }
 }

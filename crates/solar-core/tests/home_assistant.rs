@@ -254,6 +254,68 @@ fn wait(service: &SolarService, predicate: impl Fn(&solar_core::Snapshot) -> boo
 }
 
 #[test]
+fn production_heartbeat_ids_advance_past_second_ping_without_reconnect() {
+    if std::env::var("SOLAR_HA_HEARTBEAT_CHILD").as_deref() != Ok("1") {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "production_heartbeat_ids_advance_past_second_ping_without_reconnect", "--nocapture"])
+            .env("SOLAR_HA_HEARTBEAT_CHILD", "1")
+            .env("SOLAR_HA_FIXTURE_TOKEN", "synthetic-test-token")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (done, completed) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(25))).unwrap();
+        let mut ws = tungstenite::accept(socket).unwrap();
+        write(&mut ws, json!({"type":"auth_required"}));
+        assert_eq!(request(&mut ws)["type"], "auth");
+        write(&mut ws, json!({"type":"auth_ok"}));
+        assert_eq!(request(&mut ws)["id"], 1);
+        write(&mut ws, json!({"id":1,"type":"result","success":true}));
+        assert_eq!(request(&mut ws)["id"], 2);
+        write(&mut ws, json!({"id":2,"type":"result","success":true,"result":[]}));
+        for id in [3, 4] {
+            assert_eq!(request(&mut ws), json!({"id":id,"type":"ping"}), "HA rejects reused heartbeat IDs");
+            let at = chrono::DateTime::from_timestamp_millis(solar_core::now_ms() - 1000).unwrap().to_rfc3339();
+            event(
+                &mut ws,
+                "sensor.dsmr_atomic_grid_sample",
+                json!({"entity_id":"sensor.dsmr_atomic_grid_sample","state":(id-2).to_string(),
+                    "attributes":{"schema_version":1,"session":"synthetic-production-heartbeat",
+                        "sample_sequence":id-2,"meter_timestamp":at,"received_at":at,
+                        "import_w":0,"export_w":0}}),
+            );
+            write(&mut ws, json!({"id":id,"type":"pong"}));
+        }
+        done.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let cfg = SolarConfig::from_json(&json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"endpoint":format!("ws://{address}/api/websocket"),
+            "tokenEnv":"SOLAR_HA_FIXTURE_TOKEN","atomicGrid":"sensor.dsmr_atomic_grid_sample"}
+    }))
+    .unwrap();
+    let service = SolarService::start(cfg);
+    completed.recv_timeout(Duration::from_secs(50)).unwrap();
+    let s = wait(&service, |s| s.home_assistant.as_ref().is_some_and(|h| h.entities[0].sample_sequence == Some(2)));
+    let stats = &s.diagnostics;
+    assert_eq!(stats.errors, 0);
+    assert_eq!(stats.reconnects, 0);
+    assert!(s.reading_at.is_some());
+    assert!(!s.evaluation.safe_to_start, "two samples cannot bypass 300-second stability");
+    service.stop();
+    release.send(()).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
 fn websocket_worker_round_trip_and_failures() {
     // Environment mutations are isolated to a child process, never concurrent test threads.
     if std::env::var("SOLAR_HA_FIXTURE_CHILD").as_deref() != Ok("1") {

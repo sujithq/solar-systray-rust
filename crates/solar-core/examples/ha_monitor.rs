@@ -52,6 +52,8 @@ fn client_code(code: Option<&str>) -> &'static str {
         Some("ha-closed") => "ha-closed",
         Some("ha-json") => "ha-json",
         Some("ha-unexpected-response") => "ha-unexpected-response",
+        Some("ha-heartbeat-rejected") => "ha-heartbeat-rejected",
+        Some("ha-command-id-exhausted") => "ha-command-id-exhausted",
         Some("ha-subscription-rejected") => "ha-subscription-rejected",
         Some("ha-snapshot-rejected") => "ha-snapshot-rejected",
         Some("ha-snapshot-shape") => "ha-snapshot-shape",

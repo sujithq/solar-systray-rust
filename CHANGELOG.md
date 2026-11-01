@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- HA heartbeat commands now use strictly increasing IDs instead of reusing ID 3.
+  Reusing the second heartbeat ID caused HA to reject the command and the client
+  to reconnect. Pongs remain strictly correlated; invalid responses still fail closed.
+
 ### Added
 
 - Opt-in bounded HA-only monitoring harness with sanitized acceptance reporting,
