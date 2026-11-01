@@ -95,6 +95,7 @@ pub fn defaults() -> Value {
             "endpoint": "ws://127.0.0.1:8123/api/websocket", "tokenEnv": "SOLAR_HA_TOKEN",
             "gridImport": "sensor.electricity_meter_power_consumption",
             "gridExport": "sensor.electricity_meter_power_production",
+            "atomicGrid": "",
             "activePower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5
         },
         "decision": {

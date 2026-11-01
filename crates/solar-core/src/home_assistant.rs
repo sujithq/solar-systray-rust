@@ -1,5 +1,5 @@
-//! Independent WebSocket-only Home Assistant feed. HA state changes are provisional
-//! acquisition evidence; unchanged states cannot keep a recommendation alive.
+//! Independent WebSocket-only Home Assistant feed. Atomic telegram sequences
+//! provide acquisition evidence; separate entity changes remain provisional.
 
 use crate::config::ConfigError;
 use crate::reading::Reading;
@@ -16,6 +16,7 @@ pub struct HaConfig {
     pub token_env: String,
     pub grid_import: String,
     pub grid_export: String,
+    pub atomic_grid: String,
     pub active_power: String,
     pub inverter_stale_seconds: f64,
     pub grid_skew_seconds: f64,
@@ -30,6 +31,7 @@ impl HaConfig {
             token_env: text("tokenEnv")?.into(),
             grid_import: text("gridImport")?.into(),
             grid_export: text("gridExport")?.into(),
+            atomic_grid: text("atomicGrid")?.into(),
             active_power: text("activePower")?.into(),
             inverter_stale_seconds: v["inverterStaleSeconds"].as_f64().ok_or_else(error)?,
             grid_skew_seconds: v["gridSkewSeconds"].as_f64().ok_or_else(error)?,
@@ -48,6 +50,11 @@ impl HaConfig {
             || !entity(&config.grid_import)
             || !entity(&config.grid_export)
             || (!config.active_power.is_empty() && !entity(&config.active_power))
+            || (!config.atomic_grid.is_empty()
+                && (!entity(&config.atomic_grid)
+                    || config.atomic_grid == config.grid_import
+                    || config.atomic_grid == config.grid_export
+                    || config.atomic_grid == config.active_power))
             || config.grid_import == config.grid_export
             || config.active_power == config.grid_import
             || config.active_power == config.grid_export
@@ -88,6 +95,7 @@ impl HaConfig {
         json!({
             "endpoint": self.endpoint, "tokenEnv": self.token_env,
             "gridImport": self.grid_import, "gridExport": self.grid_export,
+            "atomicGrid": self.atomic_grid,
             "activePower": self.active_power, "inverterStaleSeconds": self.inverter_stale_seconds,
             "gridSkewSeconds": self.grid_skew_seconds
         })
@@ -110,6 +118,233 @@ impl Sample {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct AtomicPayload {
+    session: String,
+    sequence: u64,
+    meter_at: i64,
+    publisher_at: i64,
+    import_w: f64,
+    export_w: f64,
+}
+
+#[derive(serde::Deserialize)]
+struct AtomicAttributes {
+    schema_version: u64,
+    session: String,
+    sample_sequence: u64,
+    meter_timestamp: String,
+    received_at: String,
+    import_w: f64,
+    export_w: f64,
+}
+
+fn utc_timestamp(text: &str) -> Result<i64, &'static str> {
+    if text.len() > 40 {
+        return Err("ha-atomic-time");
+    }
+    let time = chrono::DateTime::parse_from_rfc3339(text).map_err(|_| "ha-atomic-time")?;
+    if time.offset().local_minus_utc() != 0 || text.ends_with("-00:00") {
+        return Err("ha-atomic-time");
+    }
+    Ok(time.timestamp_millis())
+}
+
+fn atomic_payload(value: &Value, now: i64) -> Result<AtomicPayload, &'static str> {
+    let state = value["state"].as_str().ok_or("ha-atomic-unavailable")?;
+    if matches!(state, "unavailable" | "unknown") {
+        return Err("ha-atomic-unavailable");
+    }
+    if !value["attributes"]["available"].is_null() && value["attributes"]["available"] != true {
+        return Err("ha-atomic-unavailable");
+    }
+    let a: AtomicAttributes = serde_json::from_value(value["attributes"].clone()).map_err(|_| "ha-atomic-schema")?;
+    if a.schema_version != 1
+        || a.sample_sequence == 0
+        || a.sample_sequence > 9_007_199_254_740_991
+        || state != a.sample_sequence.to_string()
+        || a.session.is_empty()
+        || a.session.len() > 128
+        || !a.session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("ha-atomic-schema");
+    }
+    if [a.import_w, a.export_w].iter().any(|w| !w.is_finite() || !(0.0..=1_000_000.0).contains(w)) {
+        return Err("ha-atomic-power");
+    }
+    let meter_at = utc_timestamp(&a.meter_timestamp)?;
+    let publisher_at = utc_timestamp(&a.received_at)?;
+    for at in [meter_at, publisher_at] {
+        if at <= 0 || now.saturating_sub(at) >= 30_000 || at.saturating_sub(now) > 5000 {
+            return Err("ha-atomic-time");
+        }
+    }
+    if meter_at.saturating_sub(publisher_at) > 5000 || publisher_at.saturating_sub(meter_at) >= 30_000 {
+        return Err("ha-atomic-time");
+    }
+    Ok(AtomicPayload {
+        session: a.session,
+        sequence: a.sample_sequence,
+        meter_at,
+        publisher_at,
+        import_w: a.import_w,
+        export_w: a.export_w,
+    })
+}
+
+struct AtomicSample {
+    payload: AtomicPayload,
+    received: Instant,
+    age_at_receive: i64,
+}
+
+impl AtomicSample {
+    fn age(&self, now: i64) -> i64 {
+        let at = self.payload.meter_at.min(self.payload.publisher_at);
+        now.saturating_sub(at)
+            .max(self.age_at_receive.saturating_add(self.received.elapsed().as_millis().min(i64::MAX as u128) as i64))
+    }
+}
+
+#[derive(Default)]
+struct AtomicGrid {
+    high_water: Option<AtomicPayload>,
+    retired_sessions: std::collections::HashSet<String>,
+    sample: Option<AtomicSample>,
+    observation: Option<Observation>,
+    last_issue: Option<&'static str>,
+    reset: bool,
+}
+
+impl AtomicGrid {
+    fn invalidate(&mut self, issue: &str) {
+        self.sample = None;
+        self.reset = true;
+        // Only fixed client codes reach diagnostics; transport errors live in MeterStats.
+        self.last_issue = Some(if issue == "ha-atomic-unavailable" {
+            "ha-atomic-unavailable"
+        } else {
+            "ha-awaiting-new-atomic-sample"
+        });
+    }
+
+    fn apply(&mut self, value: &Value, now: i64, live: bool) {
+        let stamp = |name: &str| {
+            value[name]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.timestamp_millis())
+        };
+        self.observation = Some(Observation {
+            changed: stamp("last_changed"),
+            updated: stamp("last_updated"),
+            reported: stamp("last_reported"),
+            received: Instant::now(),
+        });
+        let result = atomic_payload(value, now).and_then(|payload| {
+            if self.retired_sessions.contains(&payload.session) {
+                return Err("ha-atomic-retired-session");
+            }
+            if let Some(old) = &self.high_water {
+                if old.session == payload.session {
+                    // Cached identical snapshots are not fresh samples. They may
+                    // retain the watermark, but never retain eligibility.
+                    if !live && *old == payload {
+                        return Ok(payload);
+                    }
+                    if payload.sequence <= old.sequence
+                        || payload.meter_at <= old.meter_at
+                        || payload.publisher_at <= old.publisher_at
+                    {
+                        return Err("ha-atomic-replay");
+                    }
+                } else {
+                    if self.retired_sessions.len() >= 64 {
+                        return Err("ha-atomic-session-limit");
+                    }
+                    // Session restart resets sequence, not the meter's physical
+                    // clock. Do not accept an older telegram from a new session.
+                    if payload.meter_at <= old.meter_at || payload.publisher_at <= old.publisher_at {
+                        return Err("ha-atomic-replay");
+                    }
+                    self.retired_sessions.insert(old.session.clone());
+                    self.reset = true;
+                }
+            } else {
+                self.reset = true;
+            }
+            Ok(payload)
+        });
+        match result {
+            Ok(payload) => {
+                self.high_water = Some(payload.clone());
+                if live {
+                    self.sample = Some(AtomicSample {
+                        age_at_receive: now.saturating_sub(payload.meter_at.min(payload.publisher_at)).max(0),
+                        received: Instant::now(),
+                        payload,
+                    });
+                    self.last_issue = None;
+                } else {
+                    self.invalidate("snapshot");
+                }
+            }
+            Err(issue) => {
+                self.invalidate(issue);
+                self.last_issue = Some(issue);
+            }
+        }
+    }
+
+    fn issue(&self, now: i64, stale_seconds: f64) -> &'static str {
+        if let Some(issue) = self.last_issue {
+            return issue;
+        }
+        let Some(sample) = &self.sample else {
+            return "ha-awaiting-new-atomic-sample";
+        };
+        if sample.payload.meter_at > now || sample.payload.publisher_at > now {
+            return "ha-atomic-future";
+        }
+        if sample.age(now) as f64 >= stale_seconds.min(30.0) * 1000.0 {
+            return "ha-atomic-stale";
+        }
+        ""
+    }
+
+    fn reading(&self, now: i64, stale_seconds: f64) -> Option<Reading> {
+        if !self.issue(now, stale_seconds).is_empty() {
+            return None;
+        }
+        let sample = self.sample.as_ref()?;
+        Some(Reading::new(
+            sample.payload.meter_at,
+            sample.payload.import_w,
+            sample.payload.export_w,
+            "home-assistant-atomic",
+        ))
+    }
+
+    fn diagnostic(&self, entity: String, now: i64, stale_seconds: f64) -> EntityDiagnostic {
+        let o = self.observation.as_ref();
+        let h = self.high_water.as_ref();
+        let issue = self.issue(now, stale_seconds);
+        EntityDiagnostic {
+            entity,
+            ha_last_changed: o.and_then(|o| o.changed),
+            ha_last_updated: o.and_then(|o| o.updated),
+            ha_last_reported: o.and_then(|o| o.reported),
+            received_age_ms: o.map(|o| o.received.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            evidence_at: self.sample.as_ref().map(|s| s.payload.meter_at),
+            age_ms: self.sample.as_ref().map(|s| s.age(now)),
+            issue: (!issue.is_empty()).then(|| issue.into()),
+            sample_sequence: h.map(|h| h.sequence),
+            meter_timestamp: h.map(|h| h.meter_at),
+            publisher_received_at: h.map(|h| h.publisher_at),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityDiagnostic {
@@ -121,6 +356,12 @@ pub struct EntityDiagnostic {
     pub evidence_at: Option<i64>,
     pub age_ms: Option<i64>,
     pub issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter_timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_received_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -148,6 +389,7 @@ pub struct HaState {
     observations: [Option<Observation>; 3],
     issues: [Option<String>; 3],
     live_changes: [bool; 3],
+    atomic: AtomicGrid,
     pub stats: MeterStats,
     ready: bool,
 }
@@ -161,6 +403,7 @@ impl HaState {
             observations: [None, None, None],
             issues: [None, None, None],
             live_changes: [false; 3],
+            atomic: AtomicGrid::default(),
             stats: MeterStats::default(),
             ready: false,
         }
@@ -258,9 +501,11 @@ fn run_session(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaConfig) -
     let mut buffered: Vec<(String, Value)> = Vec::new();
     let mut buffered_bytes = 0;
     let relevant = |id: &str| {
-        id == config.grid_import
-            || id == config.grid_export
-            || (!config.active_power.is_empty() && id == config.active_power)
+        (if config.atomic_grid.is_empty() {
+            id == config.grid_import || id == config.grid_export
+        } else {
+            id == config.atomic_grid
+        }) || (!config.active_power.is_empty() && id == config.active_power)
     };
     while !stop.load(Ordering::Relaxed) {
         if (phase < 4 && Instant::now() >= deadline)
@@ -406,16 +651,29 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaCon
 
 impl HaState {
     pub fn diagnostics(&self, now: i64, meter_stale_seconds: f64) -> HaDiagnostics {
-        let ids = [&self.config.grid_import, &self.config.grid_export, &self.config.active_power];
+        let ids = if self.config.atomic_grid.is_empty() {
+            vec![&self.config.grid_import, &self.config.grid_export, &self.config.active_power]
+        } else {
+            vec![&self.config.atomic_grid, &self.config.active_power]
+        };
         HaDiagnostics {
             connected: self.stats.connected,
             initialized: self.ready,
-            evidence: "provisional HA value-change evidence; physical acquisition unverified".into(),
+            evidence: if self.config.atomic_grid.is_empty() {
+                "provisional HA value-change evidence; physical acquisition unverified"
+            } else {
+                "atomic checksum-accepted telegram sequence; publisher/live acceptance pending"
+            }
+            .into(),
             entities: ids
                 .iter()
                 .enumerate()
                 .filter(|(_, id)| !id.is_empty())
                 .map(|(i, id)| {
+                    if !self.config.atomic_grid.is_empty() && i == 0 {
+                        return self.atomic.diagnostic((*id).clone(), now, meter_stale_seconds);
+                    }
+                    let i = if self.config.atomic_grid.is_empty() { i } else { 2 };
                     let o = self.observations[i].as_ref();
                     let s = self.samples[i].as_ref();
                     EntityDiagnostic {
@@ -440,6 +698,9 @@ impl HaState {
                                 None
                             }
                         }),
+                        sample_sequence: None,
+                        meter_timestamp: None,
+                        publisher_received_at: None,
                     }
                 })
                 .collect(),
@@ -447,6 +708,7 @@ impl HaState {
     }
 
     pub fn disconnect(&mut self, issue: &str) {
+        self.atomic.invalidate(issue);
         self.samples = [None, None, None];
         self.live_changes = [false; 3];
         self.ready = false;
@@ -465,9 +727,11 @@ impl HaState {
     }
 
     pub fn relevant(&self, id: &str) -> bool {
-        id == self.config.grid_import
-            || id == self.config.grid_export
-            || (!self.config.active_power.is_empty() && id == self.config.active_power)
+        (if self.config.atomic_grid.is_empty() {
+            id == self.config.grid_import || id == self.config.grid_export
+        } else {
+            id == self.config.atomic_grid
+        }) || (!self.config.active_power.is_empty() && id == self.config.active_power)
     }
 
     pub fn state(&mut self, id: &str, value: &Value, now: i64) {
@@ -479,6 +743,18 @@ impl HaState {
     }
 
     fn apply(&mut self, id: &str, value: &Value, now: i64, live: bool) {
+        if !self.config.atomic_grid.is_empty() {
+            if id == self.config.atomic_grid {
+                self.atomic.apply(value, now, live);
+                if live && self.atomic.last_issue.is_some() {
+                    self.stats.errors += 1;
+                }
+                return;
+            }
+            if id != self.config.active_power {
+                return;
+            }
+        }
         let index = if id == self.config.grid_import {
             0
         } else if id == self.config.grid_export {
@@ -568,6 +844,23 @@ impl HaState {
     }
 
     pub fn grid(&mut self, now: i64, stale_seconds: f64) -> Option<Reading> {
+        if !self.config.atomic_grid.is_empty() {
+            let reading =
+                if self.ready && self.stats.connected { self.atomic.reading(now, stale_seconds) } else { None };
+            if let Some(reading) = &reading {
+                if self.stats.last_reading_at != Some(reading.timestamp) {
+                    self.stats.telegrams += 1;
+                }
+                self.stats.last_reading_at = Some(reading.timestamp);
+                self.stats.last_issue = None;
+            } else if self.stats.connected {
+                self.stats.last_issue = Some(
+                    if !self.ready { "ha-awaiting-initialization" } else { self.atomic.issue(now, stale_seconds) }
+                        .into(),
+                );
+            }
+            return reading;
+        }
         let result = (|| {
             if !self.ready || !self.stats.connected {
                 return Err("ha-disconnected");
@@ -627,5 +920,9 @@ impl HaState {
             }
             _ => InverterSnapshot::without_reading(InverterStatus::Offline, Some("ha-ac-unavailable-or-stale".into())),
         }
+    }
+
+    pub fn take_atomic_reset(&mut self) -> bool {
+        std::mem::take(&mut self.atomic.reset)
     }
 }

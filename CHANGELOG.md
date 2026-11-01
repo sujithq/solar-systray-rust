@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preserved 30-second meter/90-second inverter defaults and bounded grid skew.
   Cached/unchanged states cannot renew recommendations; daily/quarter-hour and
   unverified household derivations are explicitly unavailable pending live acceptance.
+- Configurable atomic DSMR grid-sample feed with same-telegram W values, session/sequence
+  replay checks and independent meter/callback times. Advancing acquisition sequences
+  keep unchanged power fresh and earn the full 300-second GO interval within the unchanged
+  30-second stale bound. Snapshot/reconnect/session changes reset eligibility; unavailable
+  atomic samples never fall back to separate HA powers. Publisher/live acceptance is pending.
 
 ## [0.1.0] - 2026-10-30
 

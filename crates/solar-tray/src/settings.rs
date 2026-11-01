@@ -229,13 +229,14 @@ mod tests {
     #[test]
     fn ha_settings_preserve_credential_reference_and_companion_compatibility() {
         let solar = json!({"energySource":{"type":"home-assistant"},
-            "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3}});
+            "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3,"atomicGrid":"sensor.dsmr_atomic_grid_sample_2"}});
         let text = render(&solar, &TraySettings::default());
         let (saved, config, _) = parse(&text).unwrap();
         assert!(config.is_ha());
         assert_eq!(saved, solar);
         assert_eq!(config.home_assistant.token_env, "SOLAR_HA_TOKEN");
         assert_eq!(config.home_assistant.grid_skew_seconds, 3.0);
+        assert_eq!(config.home_assistant.atomic_grid, "sensor.dsmr_atomic_grid_sample_2");
         let companion = json!({"mode":"solar","solar":solar}).to_string();
         let seeded = seed_from_companion(&companion).unwrap();
         assert!(SolarConfig::from_json(&seeded).unwrap().is_ha());

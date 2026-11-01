@@ -313,10 +313,17 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
         }
         for entity in &ha.entities {
             let value = entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
-                Some(ms) => format!("HA-change age {:.1}s", ms as f64 / 1000.0),
+                Some(ms) => format!(
+                    "{} age {:.1}s",
+                    if entity.sample_sequence.is_some() { "Telegram" } else { "HA-change" },
+                    ms as f64 / 1000.0
+                ),
                 None => "Unavailable".into(),
             });
             rows.push(row(&entity.entity, value, if entity.issue.is_some() { Tone::Warn } else { Tone::Muted }));
+            if let Some(sequence) = entity.sample_sequence {
+                rows.push(row("Atomic sample sequence", sequence.to_string(), Tone::Muted));
+            }
         }
         return rows;
     }

@@ -137,7 +137,12 @@ impl Runtime {
     pub fn ha_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
         if let Meter::HomeAssistant(state) = &mut self.meter {
             state.state(id, value, now);
-            match state.grid(now, self.config.decision.stale_after_seconds) {
+            let reset = state.take_atomic_reset();
+            let reading = state.grid(now, self.config.decision.stale_after_seconds);
+            if reset {
+                self.invalidate();
+            }
+            match reading {
                 Some(reading) => self.observe(&reading, now),
                 None => self.invalidate(),
             }

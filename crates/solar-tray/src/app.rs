@@ -998,7 +998,7 @@ mod tests {
         let path = dir.join("config.json");
         // Missing credential reference prevents any network access in this test.
         let solar = json!({"energySource":{"type":"home-assistant"},
-            "homeAssistant":{"tokenEnv":"SOLAR_HA_SELECTION_TEST_UNCONFIGURED"}});
+            "homeAssistant":{"tokenEnv":"SOLAR_HA_SELECTION_TEST_UNCONFIGURED","atomicGrid":"sensor.dsmr_atomic_grid_sample"}});
         settings::save(&path, &solar, &TraySettings::default()).unwrap();
         assert!(std::env::var_os("SOLAR_HA_SELECTION_TEST_UNCONFIGURED").is_none());
         let mut agent = None;

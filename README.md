@@ -114,13 +114,14 @@ Merge these sections into the `solar` object of your existing config:
   "homeAssistant": {
     "endpoint": "ws://127.0.0.1:8123/api/websocket",
     "tokenEnv": "SOLAR_HA_TOKEN",
+    "atomicGrid": "sensor.dsmr_atomic_grid_sample",
     "gridImport": "sensor.electricity_meter_power_consumption",
     "gridExport": "sensor.electricity_meter_power_production",
     "activePower": "",
     "inverterStaleSeconds": 90,
     "gridSkewSeconds": 5
   },
-  "decision": { "staleAfterSeconds": 30 }
+  "decision": { "staleAfterSeconds": 30, "stableDurationSeconds": 300 }
 }
 ```
 
@@ -137,19 +138,78 @@ trusted certificate valid for that IP across untrusted networks. `ws` transmits
 the token unencrypted and is appropriate only on a trusted local transport.
 TLS validation is never disabled, and redirects are not followed.
 
-Import/export are independently nonnegative **kW** values, multiplied by 1000
+#### Decision-grade atomic grid samples
+
+`atomicGrid` selects one atomic DSMR sample entity **exclusively**. The example ID
+is configurable: HA's registry may suffix it (for example
+`sensor.dsmr_atomic_grid_sample_2`). Configure the actual publisher entity after
+its separately approved setup; this client does not install a publisher. A missing,
+invalid or unavailable atomic entity never falls back to the separate power
+entities, REST, Solar Agent or hardware.
+
+The acquisition-side publisher uses HA's existing complete, checksum-accepted
+DSMR callback, not a second hardware reader. It must emit one entity update per
+accepted telegram containing both validated powers, even when both are unchanged.
+The numeric entity state is the positive integer `sample_sequence`. Its attributes
+must contain:
+
+| Attribute | Required contract |
+| --- | --- |
+| `schema_version` | Integer `1` |
+| `session` | New random lifecycle identifier on publisher restart, 1-128 ASCII letters/digits/`-`/`_` |
+| `sample_sequence` | Positive integer equal to state, at most 9007199254740991 |
+| `meter_timestamp` | Timezone-aware UTC RFC 3339 meter message time |
+| `received_at` | Timezone-aware UTC RFC 3339 acquisition callback arrival time |
+| `import_w`, `export_w` | Same-telegram finite nonnegative powers, already **W**, at most 1000000 W |
+
+The publisher reports `unavailable` on missing/invalid fields or acquisition
+silence and omits powers rather than substituting zero. The client also rejects
+an explicit false availability attribute if provided. It independently validates
+schema, both powers, state/sequence agreement, UTC times, age **less than 30 s**
+and future skew at most **5 s**. Future-tolerated samples are held unavailable
+until both clocks are no longer in the future. An advancing sequence must also
+advance meter time and callback time; arrival alone cannot conceal replay.
+
+Atomic freshness uses the older of meter/callback time and a monotonic client
+silence clock. `decision.staleAfterSeconds` may impose a stricter cutoff but cannot
+weaken the publisher's 30-second bound. Every accepted new live sequence advances
+the decision sample even when import is zero and export is constant. This permits
+the unchanged surplus to earn the unchanged **300-second** sustained-GO requirement
+without lengthening freshness or shortening stability.
+
+Snapshots establish a replay watermark but never enable GO or renew sample age.
+Reconnect requires a newer live sample and resets GO stability. A publisher session
+change also resets GO; its sequence may restart, but its meter/callback times must
+still advance. Replayed/nonadvancing sequences and retired sessions fail closed.
+Retired-session tracking is bounded to 64 lifecycle changes in one client runtime;
+overflow stays unavailable until a deliberate client restart. Diagnostics distinguish
+atomic telegram evidence from provisional HA value-change evidence and expose the
+sequence, meter/callback times and sample age separately from HA metadata.
+
+**Publisher deployment and live acceptance are still pending.** Atomic client
+support has been exercised with mocks only; measurement correctness remains the
+user working assumption, not verified device behavior. Do not turn an advancing
+built-in DSMR timestamp into a freshness signal: it can precede power updates or
+come from a telegram missing required powers. Timestamp-only signals, arbitrary
+debounce and heartbeat/report times do not establish an atomic sample.
+
+#### Conservative separate-entity mode
+
+For existing HA configurations, `atomicGrid` defaults to `""`, preserving the
+previous conservative pair mode. This is an explicit configuration choice, not
+an automatic recovery path from an unavailable atomic entity.
+In this mode import/export are independently nonnegative **kW** values, multiplied by 1000
 to watts; net import is import minus export. Both members must be valid and
 independently younger than `decision.staleAfterSeconds` (default **30 s**), with
 sample skew at most `gridSkewSeconds` (default **5 s**, configurable 0-30 s).
 A coherent pair advances the decision sample only when a member has a newer
 accepted value change, never from unrelated entities or display refreshes.
-Optional `activePower` may map to `sensor.sg5_0rs_local_total_active_power` in **W**;
+In either grid mode, optional `activePower` may map to `sensor.sg5_0rs_local_total_active_power` in **W**;
 it expires independently after `inverterStaleSeconds` (default **90 s**).
 Leaving it empty disables AC. Invalid/unavailable AC affects AC display only,
 not otherwise valid grid decisions.
 
-**Measurement correctness is a user working assumption, not live verification.**
-Diagnostics label HA value-change times as provisional evidence, preserve HA
+For the separate-entity mode, diagnostics label HA value-change times as provisional evidence, preserve HA
 `last_changed`/`last_updated`/`last_reported` separately, and track receive age
 with a monotonic clock. The snapshot alone cannot enable recommendations:
 each required entity must supply new live value-change evidence after connection.
@@ -159,8 +219,8 @@ zero is not acquisition evidence. This is deliberately fail-safe: a sustained
 zero import/export may prevent GO, and the default 300-second stability interval
 cannot be earned from unchanged entities under the provisional 30-second limit.
 Do not increase stale limits or shorten stability merely to hide this limitation;
-live acceptance must establish a trustworthy unchanged-reading acquisition signal
-before enabling such measurements to renew eligibility.
+use the approved atomic acquisition interface for unchanged-reading evidence
+instead of using standalone meter clocks or unrelated report times.
 
 Missing/removed entities, `unknown`, `unavailable`, malformed values/timestamps,
 wrong units, negative grid power, future/out-of-order samples, stale data and
@@ -171,8 +231,8 @@ offline/recovery notification preferences remain available.
 AC is not PV/DC. This slice does **not** map DC power, Sungrow yield counters,
 connectivity or operating state, nor derive household use from unverified AC
 topology/signs. Daily energy and quarter-hour demand/monthly-peak/forecast features
-remain explicitly unavailable until meter clocks, counters, demand, peak and
-calendar/timezone mappings are established. No instantaneous-power or inverter-yield
+remain explicitly unavailable until full meter calendar/timezone fields, counters,
+demand and peak mappings are established. No instantaneous-power or inverter-yield
 approximation substitutes for them.
 
 Live freshness UI validation failed previously; daytime PV/sign/topology checks
