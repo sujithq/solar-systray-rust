@@ -13,4 +13,8 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Private recorded baseline provenance and source/location identity.
+*.night-baseline.json
+*.night-baseline.json.tmp
+
 # End of https://www.toptal.com/developers/gitignore/api/rust

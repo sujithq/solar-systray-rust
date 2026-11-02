@@ -212,6 +212,69 @@ built-in DSMR timestamp into a freshness signal: it can precede power updates or
 come from a telegram missing required powers. Timestamp-only signals, arbitrary
 debounce and heartbeat/report times do not establish an atomic sample.
 
+#### Recorded HA night baseline
+
+In explicit HA mode, the native tray restores its private last-valid baseline on
+startup and catches up from recorder history when a newer completed night exists.
+While running it checks a daily **Europe/Brussels** refresh time (default **06:00**):
+
+```json
+{
+  "homeAssistant": {
+    "nightBaseline": { "enabled": true, "refreshAt": "06:00" }
+  }
+}
+```
+
+`refreshAt` is a validated 24-hour `HH:MM`. A missed refresh is caught up at the next
+launch; no OS task or HA automation is created. On a spring clock jump a skipped
+refresh time runs at the first valid later tick; the repeated autumn hour cannot
+run the same daily refresh twice.
+
+The window is the most recent **completed sunset-to-sunrise night**, calculated
+from the configured location, never the PC timezone. Both rounded solar boundary
+minutes are excluded to avoid including daytime. In winter, 06:00 can precede
+sunrise: that refresh uses the preceding completed night rather than claiming the
+current partial night is complete. Choose a later refresh time if the latest
+night should be available on the same morning. Missing location or polar nights
+without supported crossings produce an explicit unavailable status.
+
+History is fetched using a **separate authenticated WebSocket** connection and
+HA's [`history/history_during_period` command](https://github.com/home-assistant/core/blob/dev/homeassistant/components/history/websocket_api.py).
+Only the configured atomic grid entity is requested, with full attributes,
+non-minimal responses and attribute changes included. The recorder must retain
+the schema-v1 sequence/session, both powers and acquisition timestamps. Merely
+having 10 days of recorder retention does not prove that these atomic attributes
+were recorded; actual availability still needs a user-run check. No REST,
+database reads, direct hardware or Solar Agent fallback is used.
+
+The statistic preserves the existing night learner: **median of the first real
+grid-import reading in each UTC minute**, in W, with at least 30 minute samples.
+Nighttime grid import remains the existing household-baseline proxy; this does
+not validate AC sign/topology or equate it with measured household consumption.
+Atomic sequence and both timestamps must advance, remain internally valid, and
+cover the completed window without 30-second-or-longer acquisition gaps.
+Unknown/unavailable, missing attributes, replay, incomplete coverage and errors
+reject the candidate, rather than filling gaps or treating them as zero.
+Five-minute/hourly statistics or means are **not** substitutes for this median.
+
+Requests use 15-minute chunks, the existing 1 MiB message bound, at most 32 MiB
+aggregate response data, a 20-second response timeout and a 180-second overall
+retrieval deadline. Failure affects only the baseline, never live grid/GO.
+Historical data is never submitted as a live measurement.
+
+The cache lives beside the selected tray config, with its extension replaced by
+`.night-baseline.json` (including isolated HA configs). It contains only the
+baseline, W unit, observation window, calculation time, sample count, provenance
+and source/config identity, never the token or raw history. Source/entity,
+location or refresh-time changes invalidate a mismatching cache. A failed
+refresh preserves a prior matching result and displays the error; the menu shows
+the recorded night, age and sample count, with results older than 36 hours
+explicitly marked stale/retained. Without a valid result, 200 W remains visibly
+**default**, not a learned value. `enabled: false` retains the previous volatile
+live-night learner. Library callers must supply a private cache path with
+`SolarService::start_with_baseline_store` to enable recorded-history retrieval.
+
 #### Provisional HA demand, peak and daily-energy features
 
 The optional `currentDemand` and `monthlyPeak` mappings expect **kW** and are

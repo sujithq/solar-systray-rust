@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- HA night baseline restored from a private source-bound cache at startup and
+  recalculated from recorded atomic samples at a configurable Brussels-local
+  daily time (default 06:00). Only completed nights with real minute-sample
+  coverage qualify; stale/retained/default/error states are visible and history
+  never contributes to live grid freshness or GO.
 - Optional Home Assistant inverter AC and DC displays from separate configurable
   W-valued entities. Each expires independently after 90 seconds using only
   last-known state-change age; neither can renew grid freshness. A separate

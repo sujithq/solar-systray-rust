@@ -39,8 +39,13 @@ pub(crate) fn pause(stop: &AtomicBool, duration: Duration) -> bool {
 
 impl SolarService {
     pub fn start(config: SolarConfig) -> Self {
+        Self::start_with_baseline_store(config, None)
+    }
+
+    pub fn start_with_baseline_store(config: SolarConfig, baseline_path: Option<std::path::PathBuf>) -> Self {
         let mock = config.is_mock();
         let ha = config.is_ha().then(|| config.home_assistant.clone());
+        let baseline_config = (config.is_ha() && config.home_assistant.night_baseline_enabled).then(|| config.clone());
         let inverter = config.inverter_enabled().then(|| config.inverter_source.clone());
         let source = (config.energy_source.host.clone(), config.energy_source.port);
         let runtime = Arc::new(Mutex::new(Runtime::new(config)));
@@ -48,6 +53,26 @@ impl SolarService {
         let spawn = |name: &str, body: Box<dyn FnOnce() + Send>| {
             thread::Builder::new().name(name.into()).spawn(body).expect("spawn worker thread");
         };
+        if let Some(config) = baseline_config {
+            if let Some(path) = baseline_path {
+                let mut status = crate::ha_baseline::HistoryStatus::default();
+                match crate::ha_baseline::load_cache(&path, &config, now_ms()) {
+                    Ok(baseline) => status.baseline = baseline,
+                    Err(issue) => status.issue = Some(issue.into()),
+                }
+                lock(&runtime).set_baseline_history(status.clone());
+                let (runtime, stop) = (runtime.clone(), stop.clone());
+                spawn(
+                    "solar-ha-history",
+                    Box::new(move || crate::ha_baseline::worker(&runtime, &stop, &path, &config, status)),
+                );
+            } else {
+                lock(&runtime).set_baseline_history(crate::ha_baseline::HistoryStatus {
+                    baseline: None,
+                    issue: Some("history-persistence-not-configured".into()),
+                });
+            }
+        }
         {
             let (runtime, stop) = (runtime.clone(), stop.clone());
             if let Some(ha) = ha {

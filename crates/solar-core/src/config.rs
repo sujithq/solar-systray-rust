@@ -104,6 +104,7 @@ pub fn defaults() -> Value {
             "energyExportTariff1": "sensor.electricity_meter_energy_production_tarif_1",
             "energyExportTariff2": "sensor.electricity_meter_energy_production_tarif_2",
             "meterDataStaleSeconds": 90, "meterDataMaxEventSkewSeconds": 30,
+            "nightBaseline": { "enabled": true, "refreshAt": "06:00" },
             "householdUse": {
                 "enabled": false, "topology": "", "generationSign": 0, "maxEventSkewSeconds": 5
             }

@@ -176,8 +176,9 @@ fn source_text(running: &Running) -> String {
     }
 }
 
-fn start_direct(config: &SolarConfig, tray: &TraySettings) -> SolarService {
-    let service = SolarService::start(config.clone());
+fn start_direct(config: &SolarConfig, tray: &TraySettings, path: &Path) -> SolarService {
+    let service =
+        SolarService::start_with_baseline_store(config.clone(), Some(path.with_extension("night-baseline.json")));
     if let Some(id) = &tray.appliance {
         // An appliance that no longer exists falls back to the configured default.
         let _ = service.select_appliance(id);
@@ -203,7 +204,7 @@ fn load(
     let agent = prepare(ha).filter(|_| !ha);
     let feed = match agent {
         Some(latest) => Feed::Agent(latest),
-        None => Feed::Direct(start_direct(&loaded.solar, &loaded.tray)),
+        None => Feed::Direct(start_direct(&loaded.solar, &loaded.tray, path)),
     };
     let running = Running {
         feed,
@@ -501,7 +502,7 @@ impl App {
                 running.alerts = Alerts::default();
             }
             (Feed::Agent(_), Source::Direct) => {
-                running.feed = Feed::Direct(start_direct(&running.config, &running.tray));
+                running.feed = Feed::Direct(start_direct(&running.config, &running.tray, &self.path));
                 running.alerts = Alerts::default();
             }
         }

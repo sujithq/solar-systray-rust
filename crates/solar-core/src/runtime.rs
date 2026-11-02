@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub night_baseline_w: Option<f64>,
     pub night_baseline_learned: bool,
     pub night_baseline_samples: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_baseline_history: Option<crate::ha_baseline::HistoryStatus>,
     pub reading_at: Option<i64>,
     pub checked_at: i64,
 }
@@ -69,6 +71,7 @@ pub struct Runtime {
     forecaster: PeakForecaster,
     daily_energy: DailyEnergy,
     night_baseline: NightBaseline,
+    baseline_history: Option<crate::ha_baseline::HistoryStatus>,
     sun_times: Option<(i64, SunTimes)>,
 }
 
@@ -81,6 +84,8 @@ impl Runtime {
         } else {
             Meter::SlimmeLezer(SlimmeLezer::new(config.energy_source.allow_legacy_without_crc))
         };
+        let baseline_history = (config.is_ha() && config.home_assistant.night_baseline_enabled)
+            .then(crate::ha_baseline::HistoryStatus::default);
         Runtime {
             engine: DecisionEngine::new(config.clone()),
             config,
@@ -89,12 +94,17 @@ impl Runtime {
             forecaster: PeakForecaster::new(),
             daily_energy: DailyEnergy::new(),
             night_baseline: NightBaseline::new(),
+            baseline_history,
             sun_times: None,
         }
     }
 
     pub fn config(&self) -> &SolarConfig {
         &self.config
+    }
+
+    pub(crate) fn set_baseline_history(&mut self, status: crate::ha_baseline::HistoryStatus) {
+        self.baseline_history = Some(status);
     }
 
     pub fn appliance(&self) -> &str {
@@ -352,6 +362,8 @@ impl Runtime {
         inverter.household_use_w = household;
         let (night_baseline_w, night_baseline_learned, night_baseline_samples) = if self.config.is_mock() {
             (None, false, 0)
+        } else if let Some(history) = &self.baseline_history {
+            (Some(history.watts()), history.baseline.is_some(), history.baseline.as_ref().map_or(0, |b| b.samples))
         } else {
             let watts = if evaluation.sun == Sun::Down {
                 reading.filter(|_| fresh).map(|r| r.grid_import_w)
@@ -412,6 +424,7 @@ impl Runtime {
             night_baseline_w,
             night_baseline_learned,
             night_baseline_samples,
+            night_baseline_history: self.baseline_history.clone(),
             reading_at: reading.map(|r| r.timestamp),
             checked_at: now,
             evaluation,

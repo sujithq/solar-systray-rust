@@ -261,7 +261,13 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             }
         }
         let text = baseline.map_or_else(|| "Unavailable".to_string(), watts);
-        let state = if s.night_baseline_learned {
+        let state = if let Some(history) = &s.night_baseline_history {
+            if history.baseline.is_some() {
+                format!("{text} (recorded night)")
+            } else {
+                format!("{text} default; no valid recorded night")
+            }
+        } else if s.night_baseline_learned {
             format!("{text} (learned)")
         } else if !s.location_configured {
             format!("{text} default; set location to learn")
@@ -271,6 +277,34 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             format!("{text} default; waiting for overnight data")
         };
         rows.push(row("Night baseline", state, Tone::Muted));
+        if let Some(history) = &s.night_baseline_history {
+            if let Some(issue) = &history.issue {
+                rows.push(row("Baseline status", issue, Tone::Warn));
+            }
+            if let Some(baseline) = &history.baseline {
+                let age_hours = (s.checked_at - baseline.window.end).max(0) as f64 / 3_600_000.0;
+                rows.push(row(
+                    "Baseline age",
+                    format!(
+                        "{age_hours:.1}h since night end{}",
+                        if age_hours > 36.0 { " (stale; retained)" } else { "" }
+                    ),
+                    if age_hours > 36.0 { Tone::Warn } else { Tone::Muted },
+                ));
+                let utc = |at| {
+                    chrono::DateTime::from_timestamp_millis(at)
+                        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| "Invalid date".into())
+                };
+                rows.push(row(
+                    "Baseline night",
+                    format!("{} - {}", utc(baseline.window.start), utc(baseline.window.end)),
+                    Tone::Muted,
+                ));
+                rows.push(row("Baseline source", &baseline.provenance, Tone::Muted));
+                rows.push(row("Baseline samples", format!("{} actual minute samples", baseline.samples), Tone::Muted));
+            }
+        }
     }
     rows
 }

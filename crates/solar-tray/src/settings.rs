@@ -283,6 +283,7 @@ mod tests {
             "energyExportTariff1":"sensor.electricity_meter_energy_production_tarif_1",
             "energyExportTariff2":"sensor.electricity_meter_energy_production_tarif_2",
             "meterDataStaleSeconds":75,"meterDataMaxEventSkewSeconds":25,
+            "nightBaseline":{"enabled":true,"refreshAt":"07:15"},
             "householdUse":{"enabled":false,"topology":"","generationSign":0,"maxEventSkewSeconds":4}}});
         let text = render(&solar, &TraySettings::default());
         let (saved, config, _) = parse(&text).unwrap();
@@ -301,6 +302,8 @@ mod tests {
         assert_eq!(config.home_assistant.energy_export_tariff2, "sensor.electricity_meter_energy_production_tarif_2");
         assert_eq!(config.home_assistant.meter_data_stale_seconds, 75.0);
         assert_eq!(config.home_assistant.meter_data_max_event_skew_seconds, 25.0);
+        assert!(config.home_assistant.night_baseline_enabled);
+        assert_eq!(config.home_assistant.night_baseline_refresh_at, "07:15");
         assert!(!config.home_assistant.household_use_enabled);
         assert_eq!(config.home_assistant.household_max_event_skew_seconds, 4.0);
         let companion = json!({"mode":"solar","solar":solar}).to_string();

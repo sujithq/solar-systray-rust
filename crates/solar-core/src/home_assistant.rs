@@ -42,6 +42,8 @@ pub struct HaConfig {
     pub energy_export_tariff2: String,
     pub meter_data_stale_seconds: f64,
     pub meter_data_max_event_skew_seconds: f64,
+    pub night_baseline_enabled: bool,
+    pub night_baseline_refresh_at: String,
     pub household_use_enabled: bool,
     pub household_topology: String,
     pub ac_generation_sign: i8,
@@ -70,6 +72,8 @@ impl HaConfig {
             energy_export_tariff2: text("energyExportTariff2")?.into(),
             meter_data_stale_seconds: v["meterDataStaleSeconds"].as_f64().ok_or_else(error)?,
             meter_data_max_event_skew_seconds: v["meterDataMaxEventSkewSeconds"].as_f64().ok_or_else(error)?,
+            night_baseline_enabled: v["nightBaseline"]["enabled"].as_bool().ok_or_else(error)?,
+            night_baseline_refresh_at: v["nightBaseline"]["refreshAt"].as_str().ok_or_else(error)?.into(),
             household_use_enabled: v["householdUse"]["enabled"].as_bool().ok_or_else(error)?,
             household_topology: v["householdUse"]["topology"].as_str().ok_or_else(error)?.into(),
             ac_generation_sign: v["householdUse"]["generationSign"]
@@ -130,6 +134,7 @@ impl HaConfig {
             || !(1.0..=86400.0).contains(&config.meter_data_stale_seconds)
             || !config.meter_data_max_event_skew_seconds.is_finite()
             || !(0.0..=30.0).contains(&config.meter_data_max_event_skew_seconds)
+            || crate::ha_baseline::refresh_minute(&config.night_baseline_refresh_at).is_none()
             || !config.household_max_event_skew_seconds.is_finite()
             || !(0.0..=30.0).contains(&config.household_max_event_skew_seconds)
             || !matches!(config.ac_generation_sign, -1..=1)
@@ -185,6 +190,10 @@ impl HaConfig {
             "energyExportTariff2": self.energy_export_tariff2,
             "meterDataStaleSeconds": self.meter_data_stale_seconds,
             "meterDataMaxEventSkewSeconds": self.meter_data_max_event_skew_seconds,
+            "nightBaseline": {
+                "enabled": self.night_baseline_enabled,
+                "refreshAt": self.night_baseline_refresh_at
+            },
             "householdUse": {
                 "enabled": self.household_use_enabled,
                 "topology": self.household_topology,
@@ -287,10 +296,10 @@ fn utc_timestamp(text: &str) -> Result<i64, &'static str> {
 }
 
 #[derive(Clone, Copy)]
-struct BelgianCalendar {
+pub(crate) struct BelgianCalendar {
     month: i64,
-    day: i64,
-    minute: i64,
+    pub(crate) day: i64,
+    pub(crate) minute: i64,
     offset_minutes: i64,
 }
 
@@ -300,7 +309,7 @@ fn last_sunday(year: i64, month: u32) -> i64 {
     last_day - (last_day + 4).rem_euclid(7)
 }
 
-fn belgian_meter_calendar(utc_ms: i64) -> Option<BelgianCalendar> {
+pub(crate) fn belgian_meter_calendar(utc_ms: i64) -> Option<BelgianCalendar> {
     let utc_seconds = utc_ms.div_euclid(1000);
     let (year, _, _) = civil_from_days(utc_seconds.div_euclid(86_400));
     if !(2000..=9998).contains(&year) {
@@ -677,6 +686,265 @@ fn run_session(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaConfig) -
         return Err("ha-token-invalid");
     }
     run_authenticated_session(runtime, stop, config, &token, Duration::from_secs(20))
+}
+
+/// Separate read-only connection: history never enters HaState or live freshness.
+pub(crate) fn recorded_night(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    window: crate::ha_baseline::NightWindow,
+) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
+    let ha = &config.home_assistant;
+    let token = std::env::var(&ha.token_env).map_err(|_| "history-token-missing")?;
+    if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
+        return Err("history-token-invalid");
+    }
+    recorded_night_with_token(config, stop, window, &token)
+}
+
+fn recorded_night_with_token(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    window: crate::ha_baseline::NightWindow,
+    token: &str,
+) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
+    let ha = &config.home_assistant;
+    let overall = Instant::now() + Duration::from_secs(180);
+    let mut budget = 32 * MAX_MESSAGE;
+    let mut ws = open(ha).map_err(|_| "history-connect-or-tls")?;
+    let read = |ws: &mut Socket, budget: &mut usize| -> Result<Value, &'static str> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Err("history-cancelled");
+            }
+            if Instant::now() >= deadline || Instant::now() >= overall {
+                return Err("history-response-timeout");
+            }
+            transport(ws)?.deadline = Some(Instant::now() + Duration::from_millis(500));
+            match ws.read() {
+                Ok(Message::Text(text)) => {
+                    if text.len() > *budget {
+                        return Err("history-byte-limit");
+                    }
+                    *budget -= text.len();
+                    return serde_json::from_str(&text).map_err(|_| "history-json");
+                }
+                Ok(Message::Ping(_) | Message::Pong(_)) => ws.flush().map_err(|_| "history-write")?,
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                _ => return Err("history-read-or-protocol"),
+            }
+        }
+    };
+    if read(&mut ws, &mut budget)?["type"] != "auth_required" {
+        return Err("history-auth-protocol");
+    }
+    send(&mut ws, json!({"type":"auth","access_token":token}))?;
+    if read(&mut ws, &mut budget)?["type"] != "auth_ok" {
+        return Err("history-auth-rejected");
+    }
+    let mut samples = crate::ha_baseline::NightSamples::new(window);
+    let mut start = window.start;
+    let mut id = 1_u64;
+    while start < window.end {
+        let end = (start + 15 * 60_000).min(window.end);
+        let iso = |at| chrono::DateTime::from_timestamp_millis(at).map(|time| time.to_rfc3339());
+        send(
+            &mut ws,
+            json!({
+                "id":id,"type":"history/history_during_period",
+                "start_time":iso(start),"end_time":iso(end),
+                "entity_ids":[ha.atomic_grid],
+                "include_start_time_state":false,"significant_changes_only":false,
+                "minimal_response":false,"no_attributes":false
+            }),
+        )?;
+        let result = read(&mut ws, &mut budget)?;
+        if result["type"] != "result" || result["id"].as_u64() != Some(id) {
+            return Err("history-response-correlation");
+        }
+        if result["success"] != true {
+            return Err("history-query-rejected");
+        }
+        append_recorded_states(&mut samples, config, &result["result"], start, end)?;
+        start = end;
+        id += 1;
+    }
+    samples.finish(crate::now_ms())
+}
+
+fn append_recorded_states(
+    samples: &mut crate::ha_baseline::NightSamples,
+    config: &crate::SolarConfig,
+    result: &Value,
+    start: i64,
+    end: i64,
+) -> Result<(), &'static str> {
+    let object = result.as_object().ok_or("history-response-shape")?;
+    if object.keys().any(|key| key != &config.home_assistant.atomic_grid) {
+        return Err("history-response-entity");
+    }
+    let Some(states) = object.get(&config.home_assistant.atomic_grid) else { return Ok(()) };
+    let states = states.as_array().filter(|s| s.len() <= 10_000).ok_or("history-response-limit")?;
+    for state in states {
+        // HA's history WebSocket API returns compressed s/a/lu/lc states.
+        // Attributes must remain present; statistics/means cannot replace them.
+        let normalized = json!({"state":state["s"],"attributes":state["a"]});
+        let received_at = state["a"]["received_at"].as_str().ok_or("history-missing-acquisition")?;
+        let received_at = utc_timestamp(received_at).map_err(|_| "history-invalid-acquisition")?;
+        let payload = atomic_payload(&normalized, received_at).map_err(|_| "history-invalid-atomic-sample")?;
+        let updated = state["lu"].as_f64().filter(|v| v.is_finite()).ok_or("history-missing-recorder-time")?;
+        let updated = updated * 1000.0;
+        if !(start as f64..=end as f64).contains(&updated) || (updated - received_at as f64).abs() >= 30_000.0 {
+            return Err("history-recorder-time-mismatch");
+        }
+        if !crate::ha_baseline::validate_night_sample(config, payload.meter_at) {
+            samples.reject("history-daytime-sample");
+            continue;
+        }
+        samples.add(payload.session, payload.sequence, payload.meter_at, payload.publisher_at, payload.import_w);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod recorded_history_tests {
+    use super::*;
+    use crate::ha_baseline::{NightSamples, NightWindow};
+    use std::net::TcpListener;
+
+    fn iso(at: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339()
+    }
+
+    fn config() -> crate::SolarConfig {
+        crate::SolarConfig::from_json(&json!({
+            "energySource":{"type":"home-assistant"},
+            "homeAssistant":{"atomicGrid":"sensor.fixture_atomic"},
+            "location":{"latitude":50.85,"longitude":4.35}
+        }))
+        .unwrap()
+    }
+
+    fn state(at: i64, sequence: u64) -> Value {
+        json!({"s":sequence.to_string(),"lu":at as f64 / 1000.0,"a":{
+            "schema_version":1,"session":"fixture-session","sample_sequence":sequence,
+            "meter_timestamp":iso(at),"received_at":iso(at),"import_w":320.0,"export_w":0.0
+        }})
+    }
+
+    #[test]
+    fn websocket_history_requests_real_attributes_in_bounded_correlated_chunks() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = config();
+        config.home_assistant.endpoint = format!("ws://{}/api/websocket", listener.local_addr().unwrap());
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-25T00:00:00Z").unwrap().timestamp_millis();
+        let window = NightWindow { start, end: start + 40 * 60_000 };
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+            let auth: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(auth["type"], "auth");
+            socket.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).unwrap();
+            let mut from = start;
+            let mut command_id = 1;
+            while from < window.end {
+                let query: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(query["id"], command_id);
+                assert_eq!(query["type"], "history/history_during_period");
+                assert_eq!(query["entity_ids"], json!(["sensor.fixture_atomic"]));
+                assert_eq!(query["no_attributes"], false);
+                assert_eq!(query["minimal_response"], false);
+                assert_eq!(query["significant_changes_only"], false);
+                assert_eq!(query["include_start_time_state"], false);
+                assert_eq!(query["start_time"], iso(from));
+                let to = (from + 15 * 60_000).min(window.end);
+                assert_eq!(query["end_time"], iso(to));
+                let states: Vec<_> = (from..to).step_by(10_000).map(|at| state(at, (at - start) as u64 + 1)).collect();
+                let result = json!({"id":command_id,"type":"result","success":true,
+                    "result":{"sensor.fixture_atomic":states}});
+                socket.send(Message::Text(result.to_string().into())).unwrap();
+                command_id += 1;
+                from = to;
+            }
+        });
+        let baseline = recorded_night_with_token(&config, &AtomicBool::new(false), window, "synthetic-token").unwrap();
+        assert_eq!(baseline.watts, 320.0);
+        assert_eq!(baseline.samples, 40);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_unavailable_or_statistics_history_never_becomes_a_baseline() {
+        let config = config();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-25T00:00:00Z").unwrap().timestamp_millis();
+        let mut bad = vec![
+            json!({"s":"unknown","lu":at as f64 / 1000.0}),
+            json!({"s":"unavailable","lu":at as f64 / 1000.0}),
+            json!({"s":"320","lu":at as f64 / 1000.0}),
+        ];
+        let mut invalid = state(at, 1);
+        invalid["a"]["import_w"] = json!(-1);
+        bad.push(invalid);
+        let mut delayed = state(at, 1);
+        delayed["lu"] = json!((at + 30_000) as f64 / 1000.0);
+        bad.push(delayed);
+        for value in bad {
+            let mut samples = NightSamples::new(NightWindow { start: at, end: at + 40 * 60_000 });
+            assert!(
+                append_recorded_states(
+                    &mut samples,
+                    &config,
+                    &json!({"sensor.fixture_atomic":[value]}),
+                    at,
+                    at + 60_000
+                )
+                .is_err()
+            );
+        }
+        let mut samples = NightSamples::new(NightWindow { start: at, end: at + 40 * 60_000 });
+        assert_eq!(
+            append_recorded_states(&mut samples, &config, &json!({"sensor.wrong":[]}), at, at + 60_000),
+            Err("history-response-entity")
+        );
+    }
+
+    #[test]
+    fn history_result_ids_and_success_are_not_silently_accepted() {
+        for (result, expected) in [
+            (json!({"id":2,"type":"result","success":true,"result":{}}), "history-response-correlation"),
+            (
+                json!({"id":1,"type":"result","success":false,"error":{"message":"untrusted server text"}}),
+                "history-query-rejected",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut config = config();
+            config.home_assistant.endpoint = format!("ws://{}/api/websocket", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                socket.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+                let _ = socket.read().unwrap();
+                socket.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).unwrap();
+                let _ = socket.read().unwrap();
+                socket.send(Message::Text(result.to_string().into())).unwrap();
+            });
+            let window = NightWindow { start: 1_800_000_000_000, end: 1_800_002_400_000 };
+            assert_eq!(
+                recorded_night_with_token(&config, &AtomicBool::new(false), window, "synthetic-token"),
+                Err(expected)
+            );
+            server.join().unwrap();
+        }
+    }
 }
 
 fn run_authenticated_session(

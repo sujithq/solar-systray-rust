@@ -89,6 +89,31 @@ fn value(info: &Info, title: &str, label: &str) -> String {
 }
 
 #[test]
+fn recorded_night_baseline_displays_provenance_age_and_retained_refresh_error() {
+    let s = snapshot(|s| {
+        s.night_baseline_w = Some(321.0);
+        s.night_baseline_learned = true;
+        s.night_baseline_history = Some(solar_core::ha_baseline::HistoryStatus {
+            baseline: Some(solar_core::ha_baseline::RecordedBaseline {
+                window: solar_core::ha_baseline::NightWindow { start: NOW - 58 * 3_600_000, end: NOW - 48 * 3_600_000 },
+                calculated_at: NOW - 47 * 3_600_000,
+                watts: 321.0,
+                samples: 600,
+                unit: "W".into(),
+                provenance: "HA recorder atomic grid import; first sample per UTC minute median".into(),
+            }),
+            issue: Some("history-incomplete-night".into()),
+        });
+    });
+    let info = solar_info(&s);
+    assert_eq!(value(&info, "Power now", "Night baseline"), "321 W (recorded night)");
+    assert_eq!(value(&info, "Power now", "Baseline status"), "history-incomplete-night");
+    assert_eq!(value(&info, "Power now", "Baseline age"), "48.0h since night end (stale; retained)");
+    assert_eq!(value(&info, "Power now", "Baseline samples"), "600 actual minute samples");
+    assert!(value(&info, "Power now", "Baseline source").contains("atomic grid import"));
+}
+
+#[test]
 fn info_shows_the_device_screen_as_readable_sections() {
     let info = solar_info(&snapshot(|_| {}));
     assert_eq!((info.headline.title.as_str(), info.headline.reason.as_str()), ("GO - START NOW", "Surplus is stable"));
