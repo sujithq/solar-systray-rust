@@ -124,7 +124,13 @@ Merge these sections into the `solar` object of your existing config:
     "activePower": "sensor.sg5_0rs_local_total_active_power",
     "dcPower": "sensor.sg5_0rs_local_total_dc_power",
     "inverterStaleSeconds": 90,
-    "gridSkewSeconds": 5
+    "gridSkewSeconds": 5,
+    "householdUse": {
+      "enabled": false,
+      "topology": "",
+      "generationSign": 0,
+      "maxEventSkewSeconds": 5
+    }
   },
   "decision": { "staleAfterSeconds": 30, "stableDurationSeconds": 300 }
 }
@@ -217,7 +223,8 @@ display. Each reading expires independently after `inverterStaleSeconds` (defaul
 **90 s**); missing, stale, unavailable, malformed, non-finite, out-of-range or
 wrong-unit values affect only that optional display, never atomic grid freshness or
 GO. Bounded signed AC is displayed with its sign unchanged; it is not absolutized
-or used to infer household consumption.
+or used for household consumption unless the separate gated calculation below is
+explicitly enabled.
 
 HA exposes no acquisition timestamp/sequence for these optional inverter entities
 in this slice. Their age is therefore only **last-known HA state-change age**,
@@ -226,7 +233,58 @@ acquired. The client preserves that original age across equal-value/attribute-on
 updates and reconnect snapshots, and does not use `last_reported`, connectivity,
 or heartbeat activity to renew it. The Connections menu labels this limitation
 explicitly. Physical AC sign, DC interpretation and topology remain unvalidated;
-household derivation stays unavailable.
+household derivation is disabled by default.
+
+### Optional gated household-use estimate
+
+The candidate formula is **`import_W - export_W + AC_W * generationSign`**.
+`generationSign` must be explicitly set to **1** or **-1** so the inverter's
+generation contribution is positive; AC is not absolutized and DC is never a
+substitute. The only currently supported topology identifier is
+`single_grid_connected_inverter`. To enable the estimate, configure
+`householdUse` with `enabled: true`, that topology identifier, and the validated
+sign, while keeping both `atomicGrid` and `activePower` mapped. The default is
+disabled with empty topology and sign 0. Do not opt in until the owner confirms
+the supported physical topology and daytime observations validate the AC sign.
+This explicit configuration is an owner assertion, not automatic physical
+validation.
+
+After those acceptance steps, the opt-in shape is:
+
+```json
+{
+  "householdUse": {
+    "enabled": true,
+    "topology": "single_grid_connected_inverter",
+    "generationSign": -1,
+    "maxEventSkewSeconds": 5
+  }
+}
+```
+
+The sign shown is illustrative only; choose `1` or `-1` from validated daytime
+observations. Configuration validation rejects unsupported topology values,
+missing atomic-grid/AC mappings, missing sign, and an event-skew limit outside
+0-30 seconds.
+
+The calculation also requires a fresh atomic grid sample (the existing maximum
+30-second grid age), a live AC value-change sample younger than the independent
+`inverterStaleSeconds` limit (default **90 s**), and
+`abs(atomic received_at - AC last_changed)` no greater than
+`householdUse.maxEventSkewSeconds` (default **5 s**, configurable 0-30 s).
+This last comparison is only provisional HA-event proximity: `received_at` and
+`last_changed` are HA-side event times, not proof of simultaneous physical
+measurements. It must not be compared to the DSMR `meter_timestamp` or described
+as physical sample skew. AC `last_changed` is not an acquisition timestamp and
+unchanged values expire even if the inverter may still be polling. Snapshots,
+`last_updated`, `last_reported`, connectivity, heartbeats and cached data cannot
+renew the AC age or satisfy the post-reconnect live-change gate.
+
+Missing, invalid, stale, skewed or out-of-range AC suppresses only this optional
+calculation; valid atomic grid decisions continue independently. Household use
+is unavailable when disabled or when any gate fails. This feature does not
+establish physical sign/topology correctness, daytime behavior or acquisition
+freshness.
 
 For the separate-entity mode, diagnostics label HA value-change times as provisional evidence, preserve HA
 `last_changed`/`last_updated`/`last_reported` separately, and track receive age
@@ -249,9 +307,11 @@ offline/recovery notification preferences remain available.
 
 AC and DC are displayed as distinct optional readings, but their meaning and
 physical freshness are not verified. This slice does **not** map Sungrow yield
-counters, treat connectivity as inverter-data freshness, or derive household use
-from unverified AC topology/signs. Daily energy and quarter-hour demand/monthly-peak/forecast features
-remain explicitly unavailable until full meter calendar/timezone fields, counters,
+counters or treat connectivity as inverter-data freshness. Household use remains
+off unless its explicit topology/sign and freshness/event-proximity gates are
+configured; enabling them does not establish physical validation. Daily energy
+and quarter-hour demand/monthly-peak/forecast features remain explicitly
+unavailable until full meter calendar/timezone fields, counters,
 demand and peak mappings are established. No instantaneous-power or inverter-yield
 approximation substitutes for them.
 

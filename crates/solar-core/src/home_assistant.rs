@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::net::{IpAddr, SocketAddr};
 
 pub const MAX_MESSAGE: usize = 1_048_576;
+pub const HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER: &str = "single_grid_connected_inverter";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HaConfig {
@@ -21,6 +22,10 @@ pub struct HaConfig {
     pub dc_power: String,
     pub inverter_stale_seconds: f64,
     pub grid_skew_seconds: f64,
+    pub household_use_enabled: bool,
+    pub household_topology: String,
+    pub ac_generation_sign: i8,
+    pub household_max_event_skew_seconds: f64,
 }
 
 impl HaConfig {
@@ -37,6 +42,13 @@ impl HaConfig {
             dc_power: text("dcPower")?.into(),
             inverter_stale_seconds: v["inverterStaleSeconds"].as_f64().ok_or_else(error)?,
             grid_skew_seconds: v["gridSkewSeconds"].as_f64().ok_or_else(error)?,
+            household_use_enabled: v["householdUse"]["enabled"].as_bool().ok_or_else(error)?,
+            household_topology: v["householdUse"]["topology"].as_str().ok_or_else(error)?.into(),
+            ac_generation_sign: v["householdUse"]["generationSign"]
+                .as_i64()
+                .and_then(|sign| i8::try_from(sign).ok())
+                .ok_or_else(error)?,
+            household_max_event_skew_seconds: v["householdUse"]["maxEventSkewSeconds"].as_f64().ok_or_else(error)?,
         };
         config.address().map_err(|_| error())?;
         let env = config.token_env.as_bytes();
@@ -69,6 +81,16 @@ impl HaConfig {
             || !(1.0..=86400.0).contains(&config.inverter_stale_seconds)
             || !config.grid_skew_seconds.is_finite()
             || !(0.0..=30.0).contains(&config.grid_skew_seconds)
+            || !config.household_max_event_skew_seconds.is_finite()
+            || !(0.0..=30.0).contains(&config.household_max_event_skew_seconds)
+            || !matches!(config.ac_generation_sign, -1..=1)
+            || (config.household_use_enabled
+                && (config.atomic_grid.is_empty()
+                    || config.active_power.is_empty()
+                    || config.household_topology != HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER
+                    || !matches!(config.ac_generation_sign, -1 | 1)))
+            || (!config.household_topology.is_empty()
+                && config.household_topology != HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER)
         {
             return Err(error());
         }
@@ -105,7 +127,13 @@ impl HaConfig {
             "atomicGrid": self.atomic_grid,
             "activePower": self.active_power, "dcPower": self.dc_power,
             "inverterStaleSeconds": self.inverter_stale_seconds,
-            "gridSkewSeconds": self.grid_skew_seconds
+            "gridSkewSeconds": self.grid_skew_seconds,
+            "householdUse": {
+                "enabled": self.household_use_enabled,
+                "topology": self.household_topology,
+                "generationSign": self.ac_generation_sign,
+                "maxEventSkewSeconds": self.household_max_event_skew_seconds
+            }
         })
     }
 }
@@ -383,6 +411,10 @@ pub struct HaDiagnostics {
     pub active_power_entity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dc_power_entity: Option<String>,
+    #[serde(default)]
+    pub household_use_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub household_use_issue: Option<String>,
 }
 
 #[derive(Clone)]
@@ -710,6 +742,8 @@ impl HaState {
             .into(),
             active_power_entity: (!self.config.active_power.is_empty()).then(|| self.config.active_power.clone()),
             dc_power_entity: (!self.config.dc_power.is_empty()).then(|| self.config.dc_power.clone()),
+            household_use_enabled: self.config.household_use_enabled,
+            household_use_issue: self.household_use_value(now, meter_stale_seconds).err().map(str::to_string),
             entities: ids
                 .iter()
                 .map(|(id, index)| {
@@ -981,6 +1015,77 @@ impl HaState {
             timestamp: ac.map(|s| s.at).into_iter().chain(dc.map(|s| s.at)).max(),
             issue: None,
         }
+    }
+
+    fn household_use_inputs(
+        &self,
+        now: i64,
+        meter_stale_seconds: f64,
+    ) -> Result<(&AtomicSample, &Sample), &'static str> {
+        if !self.config.household_use_enabled {
+            return Err("ha-household-disabled");
+        }
+        if self.config.household_topology != HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER
+            || !matches!(self.config.ac_generation_sign, -1 | 1)
+        {
+            return Err("ha-household-topology");
+        }
+        if self.config.atomic_grid.is_empty() || self.config.active_power.is_empty() {
+            return Err("ha-household-mapping");
+        }
+        if !self.stats.connected || !self.ready {
+            return Err("ha-household-disconnected");
+        }
+        if !self.atomic.issue(now, meter_stale_seconds.min(30.0)).is_empty() {
+            return Err("ha-household-grid-unavailable");
+        }
+        let grid = self.atomic.sample.as_ref().ok_or("ha-household-grid-unavailable")?;
+        let ac = self.samples[2].as_ref().ok_or("ha-household-ac-unavailable")?;
+        if !self.live_changes[2] {
+            return Err("ha-household-awaiting-live-ac");
+        }
+        if now < ac.at || ac.age(now) as f64 > self.config.inverter_stale_seconds * 1000.0 {
+            return Err("ha-household-ac-stale");
+        }
+        let event_skew_ms = grid.payload.publisher_at.abs_diff(ac.at) as f64;
+        if event_skew_ms > self.config.household_max_event_skew_seconds * 1000.0 {
+            return Err("ha-household-event-skew");
+        }
+        Ok((grid, ac))
+    }
+
+    fn household_use_from_inputs(&self, grid: &AtomicSample, ac: &Sample) -> Result<f64, &'static str> {
+        let watts =
+            grid.payload.import_w - grid.payload.export_w + ac.watts * f64::from(self.config.ac_generation_sign);
+        if !watts.is_finite() || watts < 0.0 {
+            return Err("ha-household-out-of-range");
+        }
+        Ok(watts)
+    }
+
+    fn household_use_value(&self, now: i64, meter_stale_seconds: f64) -> Result<f64, &'static str> {
+        let (grid, ac) = self.household_use_inputs(now, meter_stale_seconds)?;
+        self.household_use_from_inputs(grid, ac)
+    }
+
+    /// Household use is an opt-in estimate. The HA event proximity gate is not
+    /// physical sample coherence: AC has no acquisition timestamp.
+    pub fn household_use(
+        &self,
+        reading: Option<&Reading>,
+        now: i64,
+        meter_stale_seconds: f64,
+    ) -> Result<f64, &'static str> {
+        let (grid, ac) = self.household_use_inputs(now, meter_stale_seconds)?;
+        let reading = reading.ok_or("ha-household-grid-unavailable")?;
+        if reading.source != "home-assistant-atomic"
+            || reading.timestamp != grid.payload.meter_at
+            || reading.grid_import_w != grid.payload.import_w
+            || reading.grid_export_w != grid.payload.export_w
+        {
+            return Err("ha-household-grid-unavailable");
+        }
+        self.household_use_from_inputs(grid, ac)
     }
 
     pub fn take_atomic_reset(&mut self) -> bool {

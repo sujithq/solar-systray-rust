@@ -296,8 +296,13 @@ impl Runtime {
         fresh: bool,
         sun: Sun,
         inverter: &InverterSnapshot,
+        now: i64,
     ) -> Option<f64> {
-        let reading = reading.filter(|_| fresh && !self.config.is_mock() && !self.config.is_ha())?;
+        if self.config.is_ha() {
+            let Meter::HomeAssistant(state) = &self.meter else { return None };
+            return state.household_use(reading, now, self.config.decision.stale_after_seconds).ok();
+        }
+        let reading = reading.filter(|_| fresh && !self.config.is_mock())?;
         if sun == Sun::Down {
             return Some(reading.grid_import_w);
         }
@@ -323,7 +328,7 @@ impl Runtime {
         let fresh = self.fresh(reading, now);
         let evaluation = self.evaluate(reading, now);
         let mut inverter = self.inverter_snapshot(now);
-        let household = self.household_use(reading, fresh, evaluation.sun, &inverter);
+        let household = self.household_use(reading, fresh, evaluation.sun, &inverter, now);
         inverter.household_use_w = household;
         let (night_baseline_w, night_baseline_learned, night_baseline_samples) = if self.config.is_mock() {
             (None, false, 0)

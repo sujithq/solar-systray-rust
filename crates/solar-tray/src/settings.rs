@@ -275,7 +275,8 @@ mod tests {
     fn ha_settings_preserve_credential_reference_and_companion_compatibility() {
         let solar = json!({"energySource":{"type":"home-assistant"},
             "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3,"atomicGrid":"sensor.dsmr_atomic_grid_sample_2",
-                "activePower":"sensor.sg5_0rs_local_total_active_power","dcPower":"sensor.sg5_0rs_local_total_dc_power"}});
+                "activePower":"sensor.sg5_0rs_local_total_active_power","dcPower":"sensor.sg5_0rs_local_total_dc_power",
+                "householdUse":{"enabled":false,"topology":"","generationSign":0,"maxEventSkewSeconds":4}}});
         let text = render(&solar, &TraySettings::default());
         let (saved, config, _) = parse(&text).unwrap();
         assert!(config.is_ha());
@@ -285,6 +286,8 @@ mod tests {
         assert_eq!(config.home_assistant.atomic_grid, "sensor.dsmr_atomic_grid_sample_2");
         assert_eq!(config.home_assistant.active_power, "sensor.sg5_0rs_local_total_active_power");
         assert_eq!(config.home_assistant.dc_power, "sensor.sg5_0rs_local_total_dc_power");
+        assert!(!config.home_assistant.household_use_enabled);
+        assert_eq!(config.home_assistant.household_max_event_skew_seconds, 4.0);
         let companion = json!({"mode":"solar","solar":solar}).to_string();
         let seeded = seed_from_companion(&companion).unwrap();
         assert!(SolarConfig::from_json(&seeded).unwrap().is_ha());

@@ -238,6 +238,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
             entities: vec![],
             active_power_entity: Some("sensor.sg5_0rs_local_total_active_power".into()),
             dc_power_entity: Some("sensor.sg5_0rs_local_total_dc_power".into()),
+            household_use_enabled: false,
+            household_use_issue: Some("ha-household-disabled".into()),
         });
         s.inverter.status = InverterStatus::Online;
         s.inverter.active_power_w = Some(3517.0);
@@ -246,9 +248,10 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
     }));
     assert_eq!(value(&both, "Power now", "Inverter output (AC)"), "3.5 kW");
     assert_eq!(value(&both, "Power now", "Solar panels (DC)"), "3.6 kW");
-    assert_eq!(value(&both, "Power now", "Household use"), "Unavailable (AC topology/sign unverified)");
-    assert_eq!(value(&both, "Power now", "Extra vs night"), "Unavailable (AC topology/sign unverified)");
+    assert_eq!(value(&both, "Power now", "Household use"), "Unavailable (disabled by configuration)");
+    assert_eq!(value(&both, "Power now", "Extra vs night"), "Unavailable (disabled by configuration)");
     assert!(value(&both, "Connections", "Inverter freshness").contains("acquisition timestamp unavailable"));
+    assert!(value(&both, "Connections", "Household calculation").contains("opt-in required"));
     assert!(
         tooltip(&snapshot(|s| {
             s.home_assistant = Some(HaDiagnostics {
@@ -258,6 +261,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
                 entities: vec![],
                 active_power_entity: Some("sensor.ac".into()),
                 dc_power_entity: Some("sensor.dc".into()),
+                household_use_enabled: false,
+                household_use_issue: Some("ha-household-disabled".into()),
             });
             s.inverter.active_power_w = Some(3517.0);
             s.inverter.pv_power_w = Some(3577.0);
@@ -285,6 +290,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
             }],
             active_power_entity: Some("sensor.ac".into()),
             dc_power_entity: None,
+            household_use_enabled: false,
+            household_use_issue: Some("ha-household-disabled".into()),
         });
         s.inverter.status = InverterStatus::Offline;
         s.inverter.active_power_w = None;

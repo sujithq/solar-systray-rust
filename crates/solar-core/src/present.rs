@@ -177,6 +177,7 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         vec![row("Grid export", "-- W", Tone::Muted), row("Grid import", "-- W", Tone::Muted)]
     };
     let inverter = &s.inverter;
+    let household = inverter.household_use_w.filter(|w| w.is_finite());
     if let Some(ha) = &s.home_assistant {
         let ac = match (ha.active_power_entity.is_some(), inverter.active_power_w) {
             (_, Some(ac)) => (kilowatts(ac), Tone::Text),
@@ -190,7 +191,15 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             (true, None) => ("Unavailable or stale".into(), Tone::Warn),
         };
         rows.push(row("Solar panels (DC)", dc.0, dc.1));
-        rows.push(row("Household use", "Unavailable (AC topology/sign unverified)", Tone::Muted));
+        let household_row = household.map_or_else(
+            || {
+                let issue = ha.household_use_issue.as_deref();
+                let tone = if issue == Some("ha-household-disabled") { Tone::Muted } else { Tone::Warn };
+                (household_unavailable(issue).to_string(), tone)
+            },
+            |watts| (kilowatts(watts), Tone::Text),
+        );
+        rows.push(row("Household use", household_row.0, household_row.1));
     } else {
         match (inverter.status, inverter.pv_power_w) {
             (InverterStatus::Disabled, _) => {}
@@ -204,8 +213,9 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             _ => rows.push(row("Solar panels (PV)", "Sungrow unavailable", Tone::Warn)),
         }
     }
-    let household = inverter.household_use_w.filter(|w| w.is_finite());
-    if let Some(household) = household {
+    if s.home_assistant.is_none()
+        && let Some(household) = household
+    {
         rows.push(row("Household use", kilowatts(household), Tone::Text));
     }
     if !s.simulated {
@@ -217,9 +227,11 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
                     let value = format!("{}{above} W", if above > 0 { "+" } else { "" });
                     rows.push(row("Extra vs night", value, if above >= 300 { Tone::Warn } else { Tone::Muted }));
                 }
-                None if s.home_assistant.is_some() => {
-                    rows.push(row("Extra vs night", "Unavailable (AC topology/sign unverified)", Tone::Muted))
-                }
+                None if s.home_assistant.is_some() => rows.push(row(
+                    "Extra vs night",
+                    household_unavailable(s.home_assistant.as_ref().and_then(|ha| ha.household_use_issue.as_deref())),
+                    Tone::Muted,
+                )),
                 None => rows.push(row("Extra vs night", "Unavailable (no inverter reading)", Tone::Muted)),
             }
         }
@@ -236,6 +248,21 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         rows.push(row("Night baseline", state, Tone::Muted));
     }
     rows
+}
+
+fn household_unavailable(issue: Option<&str>) -> &'static str {
+    match issue {
+        Some("ha-household-disabled") => "Unavailable (disabled by configuration)",
+        Some("ha-household-event-skew") => "Unavailable (HA event proximity gate)",
+        Some("ha-household-ac-stale") => "Unavailable (AC last-known state is stale)",
+        Some("ha-household-awaiting-live-ac") => "Unavailable (awaiting live AC value change)",
+        Some("ha-household-out-of-range") => "Unavailable (derived value out of range)",
+        Some("ha-household-topology" | "ha-household-mapping") => "Unavailable (topology/sign configuration required)",
+        Some("ha-household-disconnected" | "ha-household-grid-unavailable" | "ha-household-ac-unavailable") => {
+            "Unavailable (required input is stale or unavailable)"
+        }
+        _ => "Unavailable (HA household-use gates not met)",
+    }
 }
 
 fn peak_rows(s: &Snapshot) -> Vec<Row> {
@@ -339,6 +366,18 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
                 Tone::Warn,
             ));
         }
+        let household_status = if !ha.household_use_enabled {
+            "Disabled by default; explicit topology/sign opt-in required"
+        } else if ha.household_use_issue.is_none() {
+            "Enabled; provisional HA event proximity gate passed, physical coherence unverified"
+        } else {
+            household_unavailable(ha.household_use_issue.as_deref())
+        };
+        rows.push(row(
+            "Household calculation",
+            household_status,
+            if ha.household_use_enabled { Tone::Warn } else { Tone::Muted },
+        ));
         return rows;
     }
     match &s.meter_address {

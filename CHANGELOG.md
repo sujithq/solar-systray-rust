@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Optional Home Assistant inverter AC and DC displays from separate configurable
   W-valued entities. Each expires independently after 90 seconds using only
-  last-known state-change age; neither can renew grid freshness or derive household use.
+  last-known state-change age; neither can renew grid freshness. A separate
+  household-use estimate remains disabled unless explicitly configured with a
+  supported topology, AC generation sign, and bounded HA-event proximity.
 - Isolated native HA monitoring via an existing absolute
   `SOLAR_SYSTRAY_HA_CONFIG` file, with HA-only atomic startup/reload validation,
   no primary settings seeding and no autostart changes.
@@ -34,12 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable grid import/export mappings (kW to W), optional distinct AC display,
   preserved 30-second meter/90-second inverter defaults and bounded grid skew.
   Cached/unchanged states cannot renew recommendations; daily/quarter-hour and
-  unverified household derivations are explicitly unavailable pending live acceptance.
+  household derivation is disabled by default and remains gated pending topology/sign
+  confirmation and live acceptance.
 - Configurable atomic DSMR grid-sample feed with same-telegram W values, session/sequence
   replay checks and independent meter/callback times. Advancing acquisition sequences
   keep unchanged power fresh and earn the full 300-second GO interval within the unchanged
   30-second stale bound. Snapshot/reconnect/session changes reset eligibility; unavailable
-  atomic samples never fall back to separate HA powers. Publisher/live acceptance is pending.
+  atomic samples never fall back to separate HA powers. The publisher was deployed
+  separately; physical calibration and household/topology acceptance remain pending.
 
 ## [0.1.0] - 2026-10-30
 

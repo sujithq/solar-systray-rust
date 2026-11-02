@@ -96,7 +96,10 @@ pub fn defaults() -> Value {
             "gridImport": "sensor.electricity_meter_power_consumption",
             "gridExport": "sensor.electricity_meter_power_production",
             "atomicGrid": "",
-            "activePower": "", "dcPower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5
+            "activePower": "", "dcPower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5,
+            "householdUse": {
+                "enabled": false, "topology": "", "generationSign": 0, "maxEventSkewSeconds": 5
+            }
         },
         "decision": {
             "safetyMarginW": 300, "stableDurationSeconds": 300, "staleAfterSeconds": 30,
@@ -193,7 +196,21 @@ impl SolarConfig {
                     if !target.contains_key(key) {
                         return fail(format!("Unknown {section} setting: {key}"));
                     }
-                    target.insert(key.clone(), value.clone());
+                    if section == "homeAssistant" && key == "householdUse" {
+                        let given_household = object(value, "homeAssistant.householdUse")?;
+                        let household = target
+                            .get_mut(key)
+                            .and_then(Value::as_object_mut)
+                            .expect("default householdUse is an object");
+                        for (household_key, household_value) in given_household {
+                            if !household.contains_key(household_key) {
+                                return fail(format!("Unknown homeAssistant.householdUse setting: {household_key}"));
+                            }
+                            household.insert(household_key.clone(), household_value.clone());
+                        }
+                    } else {
+                        target.insert(key.clone(), value.clone());
+                    }
                 }
             }
         }

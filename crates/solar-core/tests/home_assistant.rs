@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use solar_core::decision::{DecisionEngine, State};
-use solar_core::home_assistant::{HaState, MAX_MESSAGE};
+use solar_core::home_assistant::{HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER, HaState, MAX_MESSAGE};
 use solar_core::present::solar_info;
 use solar_core::sun::Sun;
 use solar_core::{Runtime, SolarConfig, SolarService};
@@ -28,10 +28,44 @@ fn config() -> SolarConfig {
     .unwrap()
 }
 
+fn household_config(sign: i64, max_event_skew_seconds: f64) -> SolarConfig {
+    SolarConfig::from_json(&json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{
+            "atomicGrid":"sensor.dsmr_atomic_grid_sample",
+            "activePower":AC,
+            "householdUse":{
+                "enabled":true,
+                "topology":HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER,
+                "generationSign":sign,
+                "maxEventSkewSeconds":max_event_skew_seconds
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn entity(id: &str, state: &str, unit: &str, at: i64) -> Value {
     let at = chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339();
     json!({"entity_id":id,"state":state,"attributes":{"unit_of_measurement":unit},
         "last_changed":at,"last_updated":at,"last_reported":at})
+}
+
+fn atomic_sample(sequence: u64, meter_at: i64, received_at: i64, import_w: u64, export_w: u64) -> Value {
+    let timestamp = |at| chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339();
+    json!({
+        "entity_id":"sensor.dsmr_atomic_grid_sample",
+        "state":sequence.to_string(),
+        "attributes":{
+            "schema_version":1,
+            "session":"household-contract",
+            "sample_sequence":sequence,
+            "meter_timestamp":timestamp(meter_at),
+            "received_at":timestamp(received_at),
+            "import_w":import_w,
+            "export_w":export_w
+        }
+    })
 }
 
 fn online() -> HaState {
@@ -53,6 +87,8 @@ fn validates_endpoint_references_entities_and_round_trip() {
     assert!(!config.inverter_enabled());
     assert_eq!(config.decision.stale_after_seconds, 30.0);
     assert_eq!(config.home_assistant.inverter_stale_seconds, 90.0);
+    assert!(!config.home_assistant.household_use_enabled);
+    assert_eq!(config.home_assistant.ac_generation_sign, 0);
     assert_eq!(SolarConfig::from_json(&config.to_json()).unwrap(), config);
     for (key, value) in [
         ("endpoint", json!("https://127.0.0.1:8123/api/websocket")),
@@ -73,6 +109,7 @@ fn validates_endpoint_references_entities_and_round_trip() {
         let error = SolarConfig::from_json(&v).unwrap_err().to_string();
         assert!(!error.contains("secret"));
     }
+
     assert!(
         SolarConfig::from_json(&json!({"energySource":{"type":"home-assistant"},
             "homeAssistant":{"activePower":AC,"dcPower":AC}}))
@@ -80,6 +117,55 @@ fn validates_endpoint_references_entities_and_round_trip() {
     );
     assert!(SolarConfig::from_json(&json!({"homeAssistant":{"token":"secret"}})).is_err());
     assert!(SolarConfig::default().to_json().get("homeAssistant").is_none(), "legacy JSON remains compatible");
+}
+
+#[test]
+fn household_use_configuration_requires_explicit_supported_topology_sign_and_atomic_ac() {
+    let base = json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{
+            "atomicGrid":"sensor.dsmr_atomic_grid_sample",
+            "activePower":AC,
+            "householdUse":{
+                "enabled":true,
+                "topology":HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER,
+                "generationSign":1,
+                "maxEventSkewSeconds":5
+            }
+        }
+    });
+    let parsed = SolarConfig::from_json(&base).unwrap();
+    assert!(parsed.home_assistant.household_use_enabled);
+    assert_eq!(parsed.home_assistant.ac_generation_sign, 1);
+    assert_eq!(SolarConfig::from_json(&parsed.to_json()).unwrap(), parsed);
+
+    for (key, value) in [
+        ("topology", json!("")),
+        ("topology", json!("unknown_topology")),
+        ("generationSign", json!(0)),
+        ("generationSign", json!(2)),
+        ("maxEventSkewSeconds", json!(31)),
+    ] {
+        let mut invalid = base.clone();
+        invalid["homeAssistant"]["householdUse"][key] = value;
+        assert!(SolarConfig::from_json(&invalid).is_err(), "{key}");
+    }
+
+    for missing in ["atomicGrid", "activePower"] {
+        let mut invalid = base.clone();
+        invalid["homeAssistant"][missing] = json!("");
+        assert!(SolarConfig::from_json(&invalid).is_err(), "{missing}");
+    }
+    let partial = json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"householdUse":{"enabled":true}}
+    });
+    assert!(SolarConfig::from_json(&partial).is_err(), "partial opt-in retains safe defaults and fails closed");
+    let unknown = json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"householdUse":{"notASetting":true}}
+    });
+    assert!(SolarConfig::from_json(&unknown).is_err());
 }
 
 #[test]
@@ -108,6 +194,104 @@ fn normalizes_independent_grid_ac_and_dc_without_household_substitution() {
     assert!(diagnostics.entities[2].issue.is_some());
     assert_eq!(diagnostics.entities[3].entity, DC);
     assert!(diagnostics.entities[3].issue.is_none());
+}
+
+#[test]
+fn gated_household_use_uses_signed_net_grid_plus_sign_normalized_ac_only() {
+    let config = household_config(-1, 5.0);
+    let mut state = HaState::new(config.home_assistant);
+    state.connected();
+    state.ready();
+
+    let meter_at = AT - 10_000;
+    let callback_at = AT;
+    let now = AT + 1_000;
+    state.state("sensor.dsmr_atomic_grid_sample", &atomic_sample(1, meter_at, callback_at, 1_000, 200), callback_at);
+    state.state(AC, &entity(AC, "-500", "W", callback_at), callback_at);
+    let reading = state.grid(now, 30.0).unwrap();
+
+    assert_eq!(reading.timestamp, meter_at);
+    assert_eq!(
+        state.household_use(Some(&reading), now, 30.0),
+        Ok(1_300.0),
+        "the event-proximity gate uses received_at, not the independent meter clock"
+    );
+
+    let config = household_config(1, 5.0);
+    let mut positive_ac = HaState::new(config.home_assistant);
+    positive_ac.connected();
+    positive_ac.ready();
+    positive_ac.state(
+        "sensor.dsmr_atomic_grid_sample",
+        &atomic_sample(1, meter_at, callback_at, 1_000, 200),
+        callback_at,
+    );
+    positive_ac.state(AC, &entity(AC, "500", "W", callback_at), callback_at);
+    let reading = positive_ac.grid(now, 30.0).unwrap();
+    assert_eq!(positive_ac.household_use(Some(&reading), now, 30.0), Ok(1_300.0));
+}
+
+#[test]
+fn household_use_fails_closed_on_missing_ac_skew_staleness_and_reconnect_snapshot() {
+    let config = household_config(1, 5.0);
+    let mut state = HaState::new(config.home_assistant);
+    state.connected();
+    state.ready();
+    let first = atomic_sample(1, AT, AT, 1_000, 200);
+    state.state("sensor.dsmr_atomic_grid_sample", &first, AT);
+    let reading = state.grid(AT, 30.0).unwrap();
+    assert_eq!(state.household_use(Some(&reading), AT, 30.0), Err("ha-household-ac-unavailable"));
+    state.state(DC, &entity(DC, "800", "W", AT), AT);
+    assert_eq!(state.household_use(Some(&reading), AT, 30.0), Err("ha-household-ac-unavailable"));
+
+    state.state(AC, &entity(AC, "500", "W", AT), AT + 6_000);
+    let skewed_grid = atomic_sample(2, AT + 6_000, AT + 6_000, 1_000, 200);
+    state.state("sensor.dsmr_atomic_grid_sample", &skewed_grid, AT + 6_000);
+    let skewed_reading = state.grid(AT + 6_000, 30.0).unwrap();
+    assert_eq!(state.household_use(Some(&skewed_reading), AT + 6_000, 30.0), Err("ha-household-event-skew"));
+    assert!(state.grid(AT + 6_000, 30.0).is_some(), "AC skew cannot suppress grid monitoring");
+
+    state.state(AC, &entity(AC, "600", "W", AT + 7_000), AT + 7_000);
+    let reading = state.grid(AT + 7_000, 30.0).unwrap();
+    assert_eq!(state.household_use(Some(&reading), AT + 7_000, 30.0), Ok(1_400.0));
+
+    state.disconnect("ha-read-or-protocol");
+    state.connected();
+    state.ready();
+    state.snapshot_state(AC, &entity(AC, "600", "W", AT + 7_000), AT + 8_000);
+    let reconnected_grid = atomic_sample(3, AT + 8_000, AT + 8_000, 1_000, 200);
+    state.state("sensor.dsmr_atomic_grid_sample", &reconnected_grid, AT + 8_000);
+    let reading = state.grid(AT + 8_000, 30.0).unwrap();
+    assert_eq!(
+        state.household_use(Some(&reading), AT + 8_000, 30.0),
+        Err("ha-household-awaiting-live-ac"),
+        "snapshot AC may not restore derived household use after reconnect"
+    );
+
+    state.state(AC, &entity(AC, "700", "W", AT + 8_000), AT + 8_000);
+    let reading = state.grid(AT + 8_000, 30.0).unwrap();
+    assert_eq!(state.household_use(Some(&reading), AT + 8_000, 30.0), Ok(1_500.0));
+    let fresh_grid = atomic_sample(4, AT + 98_001, AT + 98_001, 1_000, 200);
+    state.state("sensor.dsmr_atomic_grid_sample", &fresh_grid, AT + 98_001);
+    let reading = state.grid(AT + 98_001, 30.0).unwrap();
+    assert_eq!(
+        state.household_use(Some(&reading), AT + 98_001, 30.0),
+        Err("ha-household-ac-stale"),
+        "unchanged cached AC ages out independently while newer atomic samples keep grid fresh"
+    );
+    assert!(state.grid(AT + 98_001, 30.0).is_some(), "stale optional AC cannot suppress grid decisions");
+}
+
+#[test]
+fn household_use_rejects_negative_or_out_of_range_derived_values() {
+    let config = household_config(1, 5.0);
+    let mut state = HaState::new(config.home_assistant);
+    state.connected();
+    state.ready();
+    state.state("sensor.dsmr_atomic_grid_sample", &atomic_sample(1, AT, AT, 0, 1_000), AT);
+    state.state(AC, &entity(AC, "500", "W", AT), AT);
+    let reading = state.grid(AT, 30.0).unwrap();
+    assert_eq!(state.household_use(Some(&reading), AT, 30.0), Err("ha-household-out-of-range"));
 }
 
 #[test]
@@ -338,6 +522,55 @@ fn runtime_gates_partial_features_and_observes_transient_imports_between_ui_tick
     assert!(snapshot.inverter.household_use_w.is_none());
     assert_eq!(solar_info(&snapshot).section("Power now").unwrap().value("Inverter output (AC)"), Some("3.2 kW"));
     assert!(solar_info(&snapshot).section("Power now").unwrap().value("Solar panels (PV)").is_none());
+}
+
+#[test]
+fn runtime_displays_household_use_only_after_explicit_gates_pass() {
+    let mut runtime = Runtime::new(household_config(-1, 5.0));
+    runtime.ha_connected();
+    runtime.ha_ready();
+    runtime.ha_state("sensor.dsmr_atomic_grid_sample", &atomic_sample(1, AT - 10_000, AT, 1_000, 200), AT);
+    runtime.ha_state(AC, &entity(AC, "-500", "W", AT), AT);
+    let snapshot = runtime.snapshot(AT + 1_000);
+    assert_eq!(snapshot.inverter.household_use_w, Some(1_300.0));
+    let info = solar_info(&snapshot);
+    assert_eq!(info.section("Power now").unwrap().value("Household use"), Some("1.3 kW"));
+    assert!(
+        info.section("Connections")
+            .unwrap()
+            .value("Household calculation")
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("enabled")
+    );
+}
+
+#[test]
+fn stale_optional_ac_does_not_prevent_atomic_grid_from_earning_go() {
+    let mut config = household_config(-1, 5.0);
+    config.decision.stable_duration_seconds = 300.0;
+    let mut runtime = Runtime::new(config);
+    runtime.ha_connected();
+    runtime.ha_ready();
+    for second in 0..=301 {
+        let now = AT + second * 1000;
+        runtime.ha_state("sensor.dsmr_atomic_grid_sample", &atomic_sample(second as u64 + 1, now, now, 0, 3_000), now);
+        if second == 0 {
+            runtime.ha_state(AC, &entity(AC, "-3500", "W", now), now);
+        }
+        let snapshot = runtime.snapshot(now);
+        if second < 300 {
+            assert!(!snapshot.evaluation.safe_to_start, "premature GO at {second}s");
+        }
+        if second == 301 {
+            assert!(snapshot.evaluation.safe_to_start, "grid-only GO must remain available after AC expiry");
+            assert!(snapshot.inverter.household_use_w.is_none(), "AC state-change evidence expired after 90s");
+            assert_eq!(
+                snapshot.home_assistant.as_ref().unwrap().household_use_issue.as_deref(),
+                Some("ha-household-ac-stale")
+            );
+        }
+    }
 }
 
 fn write(ws: &mut WebSocket<TcpStream>, v: Value) {
