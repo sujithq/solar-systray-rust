@@ -73,3 +73,30 @@ fn reported_history_loading_and_errors_are_visible_without_a_report() {
         assert!(!snapshot.evaluation.safe_to_start);
     }
 }
+
+#[test]
+fn reported_history_progress_and_terminal_error_survive_snapshot_roundtrip() {
+    let now = solar_core::utc_ms(2027, 1, 15, 12, 0, 0);
+    let mut runtime = Runtime::new(
+        SolarConfig::from_json(&json!({
+            "energySource":{"type":"home-assistant"},"homeAssistant":{"atomicGrid":"sensor.fixture"}
+        }))
+        .unwrap(),
+    );
+    let mut snapshot = runtime.snapshot(now);
+    snapshot.reported_history = Some(
+        serde_json::from_value(json!({
+            "runStartedAt":now-50_000,"queryStartedAt":now-40_000,"updatedAt":now-1000,
+            "elapsedMs":39000,"completedChunks":42,"totalChunks":176,"phase":"querying",
+            "issue":null,"persistenceIssue":null
+        }))
+        .unwrap(),
+    );
+    let info = solar_info(&snapshot);
+    assert_eq!(info.section("Today").unwrap().value("History query"), Some("querying; 42/176 chunks; 40s elapsed"));
+    let progress = snapshot.reported_history.as_mut().unwrap();
+    progress.phase = "failed".into();
+    progress.issue = Some("history-response-timeout".into());
+    let restored: solar_core::Snapshot = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+    assert_eq!(restored.reported_history.unwrap().issue.as_deref(), Some("history-response-timeout"));
+}

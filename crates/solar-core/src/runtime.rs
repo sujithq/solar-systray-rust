@@ -36,6 +36,8 @@ pub struct Snapshot {
     pub reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_energy_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_history: Option<crate::ha_reported_energy::HistoryProgress>,
     pub simulated: bool,
     pub scenario: Option<String>,
     pub simulated_w: Option<i64>,
@@ -81,6 +83,7 @@ pub struct Runtime {
     ha_daily: Option<crate::ha_daily::HaDaily>,
     reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
     reported_energy_issue: Option<String>,
+    reported_history: Option<crate::ha_reported_energy::HistoryProgress>,
     night_baseline: NightBaseline,
     baseline_history: Option<crate::ha_baseline::HistoryStatus>,
     sun_times: Option<(i64, SunTimes)>,
@@ -102,6 +105,7 @@ impl Runtime {
             reported_energy: None,
             reported_energy_issue: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty())
                 .then(|| "reported-energy-waiting-for-transport".into()),
+            reported_history: None,
             engine: DecisionEngine::new(config.clone()),
             config,
             meter,
@@ -183,6 +187,10 @@ impl Runtime {
 
     pub(crate) fn begin_reported_history(&mut self) {
         self.reported_energy_issue = Some("reported-energy-loading".into());
+    }
+
+    pub(crate) fn reported_history_progress(&mut self, status: crate::ha_reported_energy::HistoryProgress) {
+        self.reported_history = Some(status);
     }
 
     pub fn appliance(&self) -> &str {
@@ -498,6 +506,7 @@ impl Runtime {
                 .filter(|value| crate::ha_daily::day_bounds(value.as_of) == crate::ha_daily::day_bounds(now))
                 .cloned(),
             reported_energy_issue: self.reported_energy_issue.clone(),
+            reported_history: self.reported_history.clone(),
             simulated: self.config.is_mock(),
             scenario: mock.map(|m| m.scenario().to_string()),
             simulated_w: mock.filter(|m| m.scenario() == "custom").and_then(MockProvider::watts),

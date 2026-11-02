@@ -3,6 +3,58 @@
 use crate::ha_daily::day_bounds;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryProgress {
+    pub run_started_at: i64,
+    pub query_started_at: Option<i64>,
+    pub updated_at: i64,
+    pub elapsed_ms: u64,
+    pub completed_chunks: u32,
+    pub total_chunks: u32,
+    pub phase: String,
+    pub issue: Option<String>,
+    pub persistence_issue: Option<String>,
+    #[serde(default)]
+    pub last_result: Option<HistoryOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryOutcome {
+    pub query_started_at: i64,
+    pub elapsed_ms: u64,
+    pub completed_chunks: u32,
+    pub total_chunks: u32,
+    pub phase: String,
+    pub issue: Option<String>,
+}
+
+impl HistoryProgress {
+    pub(crate) fn waiting(now: i64) -> Self {
+        Self {
+            run_started_at: now,
+            query_started_at: None,
+            updated_at: now,
+            elapsed_ms: 0,
+            completed_chunks: 0,
+            total_chunks: 0,
+            phase: "waiting-for-transport".into(),
+            issue: None,
+            persistence_issue: None,
+            last_result: None,
+        }
+    }
+
+    pub(crate) fn save(&self, path: &Path) -> Result<(), &'static str> {
+        let bytes = serde_json::to_vec(self).map_err(|_| "reported-history-status-write")?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(|_| "reported-history-status-write")?;
+        std::fs::rename(temporary, path).map_err(|_| "reported-history-status-write")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

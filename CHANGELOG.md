@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HA reported-energy startup now checks initialized transport every 200 ms
+  before atomic baseline recovery, avoiding an initial 30-second/bridge delay.
+  Today and a private sanitized status report expose query timing, validated
+  chunk progress and the last terminal result across bounded monitoring runs.
 - HA reported Today totals now retain explicitly gap-labeled cumulative
   endpoint deltas across intermediate unknown/unavailable recorder rows,
   without masking observed resets or invalid endpoints. Recorder timestamps

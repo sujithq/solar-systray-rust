@@ -391,6 +391,23 @@ While that fallback is displayed, **HA reported energy** also shows pending
 transport/worker initialization, loading (up to the 180-second query deadline),
 or the last query error. Small partial-run totals are not a completed reported
 full-day calculation. A refresh in progress is also labeled on a retained result.
+The first reported query polls initialized HA transport every 200 ms and runs
+before atomic baseline recovery, rather than waiting for its 30-second loop or
+a potentially long atomic-history bridge. This does not bypass authentication
+or count transport readiness as physical measurement freshness.
+
+**History query** shows the current phase, validated chunks/total, and elapsed
+query time. With a private baseline store, a sibling
+`.night-baseline.daily-energy.reported-history-status.json` file (relative to
+the tray config's stem) preserves sanitized run/query/update timestamps,
+elapsed milliseconds, chunk counts, fixed client error codes and the last
+terminal result even while a later refresh runs. It contains no endpoint,
+entity IDs, credentials, counters, readings or location. Status writes do not
+change the private energy/night caches; a write failure is shown explicitly.
+After a forced process exit an in-progress phase means only that no terminal
+outcome was persisted, not proof of a timeout. The query's 180-second deadline
+is unchanged; a launcher with a six-minute lifetime must capture this report
+instead of inferring success/failure from a screenshot or restarting repeatedly.
 History existence in an HA graph does not itself verify these four entities'
 coverage or reset convention, and this implementation makes no live access claim.
 

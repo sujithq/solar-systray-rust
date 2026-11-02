@@ -378,6 +378,33 @@ fn peak_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn today_rows(s: &Snapshot) -> Vec<Row> {
+    let mut rows = today_energy_rows(s);
+    if let Some(status) = &s.reported_history {
+        let running = matches!(status.phase.as_str(), "starting" | "connecting" | "authenticating" | "querying");
+        let elapsed = if running {
+            status.query_started_at.map_or(0, |at| (s.checked_at - at).max(0) as u64)
+        } else {
+            status.elapsed_ms
+        };
+        rows.push(row(
+            "History query",
+            format!(
+                "{}; {}/{} chunks; {}s elapsed",
+                status.phase,
+                status.completed_chunks,
+                status.total_chunks,
+                elapsed / 1000
+            ),
+            Tone::Muted,
+        ));
+        if let Some(issue) = &status.persistence_issue {
+            rows.push(row("History status report", issue, Tone::Warn));
+        }
+    }
+    rows
+}
+
+fn today_energy_rows(s: &Snapshot) -> Vec<Row> {
     if let Some(reported) = &s.reported_energy {
         let age = (s.checked_at - reported.as_of).max(0) / 1000;
         let mut rows = vec![

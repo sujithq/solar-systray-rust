@@ -1055,6 +1055,11 @@ mod tests {
         assert!(matches!(&app.mode, Mode::Broken(_)), "isolated reload cannot switch to legacy or simulation");
         assert!(app.agent.is_none() && app.chooser.is_none());
         drop(app);
+        // Stopped history workers wake from their bounded readiness wait and
+        // persist cancellation before this test removes their private report.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let status_path = path.with_extension("night-baseline.daily-energy.reported-history-status.json");
+        std::fs::remove_file(status_path).unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }

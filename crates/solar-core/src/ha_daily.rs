@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, atomic::AtomicBool};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const GAP: i64 = 30_000;
 const RETRY: i64 = 15 * 60_000;
@@ -447,6 +447,16 @@ fn save_cache(path: &Path, config: &SolarConfig, baseline: &CounterBaseline) -> 
 pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, path: Option<&Path>, config: &SolarConfig) {
     let mut saved = None;
     let mut reported_at = None;
+    let status_path = path.map(|path| path.with_extension("reported-history-status.json"));
+    let mut status = crate::ha_reported_energy::HistoryProgress::waiting(crate::now_ms());
+    publish_progress(runtime, status_path.as_deref(), &mut status);
+    // The live worker starts after this worker. Do not sleep 30 seconds or
+    // begin a potentially 180-second atomic bridge ahead of the first report.
+    if !await_reported_transport(runtime, stop) {
+        status.phase = "cancelled".into();
+        publish_progress(runtime, status_path.as_deref(), &mut status);
+        return;
+    }
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             return;
@@ -454,7 +464,40 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, path: Option<&
         let now = crate::now_ms();
         if reported_at.is_none_or(|at| now - at >= 60_000) && lock(runtime).reported_history_ready(now) {
             lock(runtime).begin_reported_history();
-            let result = crate::home_assistant::recorded_reported_energy(config, stop, now - 10_000);
+            let end = now - 10_000;
+            let started = Instant::now();
+            status.query_started_at = Some(now);
+            status.total_chunks = day_bounds(end).map_or(0, |(start, _)| ((end - start + 299_999) / 300_000) as u32);
+            status.completed_chunks = 0;
+            status.elapsed_ms = 0;
+            status.phase = "starting".into();
+            status.issue = None;
+            publish_progress(runtime, status_path.as_deref(), &mut status);
+            let result = crate::home_assistant::recorded_reported_energy(config, stop, end, |phase, chunks| {
+                status.phase = phase.into();
+                status.completed_chunks = chunks;
+                status.elapsed_ms = started.elapsed().as_millis() as u64;
+                publish_progress(runtime, status_path.as_deref(), &mut status);
+            });
+            status.elapsed_ms = started.elapsed().as_millis() as u64;
+            status.issue = result.as_ref().err().map(|issue| (*issue).into());
+            status.phase = if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                "cancelled"
+            } else if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            }
+            .into();
+            status.last_result = Some(crate::ha_reported_energy::HistoryOutcome {
+                query_started_at: now,
+                elapsed_ms: status.elapsed_ms,
+                completed_chunks: status.completed_chunks,
+                total_chunks: status.total_chunks,
+                phase: status.phase.clone(),
+                issue: status.issue.clone(),
+            });
+            publish_progress(runtime, status_path.as_deref(), &mut status);
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
@@ -500,9 +543,96 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, path: Option<&
     }
 }
 
+fn await_reported_transport(runtime: &Mutex<Runtime>, stop: &AtomicBool) -> bool {
+    while !lock(runtime).reported_history_ready(crate::now_ms()) {
+        if !pause(stop, Duration::from_millis(200)) {
+            return false;
+        }
+    }
+    !stop.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn publish_progress(
+    runtime: &Mutex<Runtime>,
+    path: Option<&Path>,
+    status: &mut crate::ha_reported_energy::HistoryProgress,
+) {
+    status.updated_at = crate::now_ms();
+    status.persistence_issue = None;
+    status.persistence_issue = path.and_then(|path| status.save(path).err()).map(String::from);
+    lock(runtime).reported_history_progress(status.clone());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_reported_query_waits_for_live_initialization_without_thirty_second_sleep_or_atomic_work() {
+        let config = SolarConfig::from_json(&json!({
+            "energySource":{"type":"home-assistant"},"homeAssistant":{"atomicGrid":"sensor.fixture"}
+        }))
+        .unwrap();
+        let runtime = std::sync::Arc::new(Mutex::new(Runtime::new(config)));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (send, recv) = std::sync::mpsc::channel();
+        let worker = {
+            let runtime = runtime.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                send.send(await_reported_transport(&runtime, &stop)).unwrap();
+            })
+        };
+        assert!(recv.recv_timeout(Duration::from_millis(50)).is_err());
+        {
+            let mut runtime = lock(&runtime);
+            runtime.ha_connected();
+            runtime.ha_ready();
+        }
+        assert!(recv.recv_timeout(Duration::from_secs(2)).unwrap(), "first query admitted promptly after readiness");
+        worker.join().unwrap();
+        assert!(lock(&runtime).snapshot(crate::now_ms()).reading_at.is_none(), "transport readiness is not freshness");
+    }
+
+    #[test]
+    fn reported_status_file_preserves_terminal_failure_across_a_following_refresh() {
+        let directory =
+            std::env::temp_dir().join(format!("solar-history-progress-{}-{}", std::process::id(), crate::now_ms()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("status.json");
+        let config = SolarConfig::from_json(&json!({
+            "energySource":{"type":"home-assistant"},"homeAssistant":{"atomicGrid":"sensor.fixture"}
+        }))
+        .unwrap();
+        let runtime = Mutex::new(Runtime::new(config));
+        let mut status = crate::ha_reported_energy::HistoryProgress::waiting(1000);
+        status.phase = "querying".into();
+        status.query_started_at = Some(2000);
+        status.completed_chunks = 7;
+        status.total_chunks = 176;
+        status.last_result = Some(crate::ha_reported_energy::HistoryOutcome {
+            query_started_at: 1500,
+            elapsed_ms: 180_000,
+            completed_chunks: 43,
+            total_chunks: 175,
+            phase: "failed".into(),
+            issue: Some("history-response-timeout".into()),
+        });
+        publish_progress(&runtime, Some(&path), &mut status);
+        let restored: crate::ha_reported_energy::HistoryProgress =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored, status);
+        assert_eq!(restored.last_result.unwrap().completed_chunks, 43);
+        assert!(status.persistence_issue.is_none());
+        publish_progress(&runtime, Some(&directory.join("missing").join("status.json")), &mut status);
+        assert_eq!(status.persistence_issue.as_deref(), Some("reported-history-status-write"));
+        assert_eq!(
+            lock(&runtime).snapshot(crate::now_ms()).reported_history.unwrap().persistence_issue,
+            status.persistence_issue
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     fn midnight() -> i64 {
         crate::utc_ms(2027, 1, 14, 23, 0, 0)

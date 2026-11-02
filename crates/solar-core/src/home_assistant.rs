@@ -823,6 +823,7 @@ fn query_history(
             include_start: false,
         },
         &mut append,
+        |_, _| {},
     )
 }
 
@@ -839,12 +840,13 @@ pub(crate) fn recorded_reported_energy(
     config: &crate::SolarConfig,
     stop: &AtomicBool,
     end: i64,
+    progress: impl FnMut(&'static str, u32),
 ) -> Result<crate::ha_reported_energy::ReportedEnergy, &'static str> {
     let token = std::env::var(&config.home_assistant.token_env).map_err(|_| "history-token-missing")?;
     if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
         return Err("history-token-invalid");
     }
-    recorded_reported_with_token(config, stop, end, &token)
+    recorded_reported_with_token(config, stop, end, &token, progress)
 }
 
 fn recorded_reported_with_token(
@@ -852,6 +854,7 @@ fn recorded_reported_with_token(
     stop: &AtomicBool,
     end: i64,
     token: &str,
+    progress: impl FnMut(&'static str, u32),
 ) -> Result<crate::ha_reported_energy::ReportedEnergy, &'static str> {
     let (start, _) = crate::ha_daily::day_bounds(end).ok_or("reported-energy-calendar")?;
     let ha = &config.home_assistant;
@@ -875,6 +878,7 @@ fn recorded_reported_with_token(
             include_start: true,
         },
         |result, start, end| samples.append(result, start, end),
+        progress,
     )?;
     samples.finish()
 }
@@ -885,10 +889,12 @@ fn query_entity_history(
     token: &str,
     query: HistoryQuery,
     mut append: impl FnMut(&Value, i64, i64) -> Result<(), &'static str>,
+    mut progress: impl FnMut(&'static str, u32),
 ) -> Result<(), &'static str> {
     let HistoryQuery { start, end, mut budget, chunk_minutes: chunk, entities, include_start } = query;
     let ha = &config.home_assistant;
     let overall = Instant::now() + Duration::from_secs(180);
+    progress("connecting", 0);
     let mut ws = open(ha).map_err(|_| "history-connect-or-tls")?;
     let read = |ws: &mut Socket, budget: &mut usize| -> Result<Value, &'static str> {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -918,6 +924,7 @@ fn query_entity_history(
             }
         }
     };
+    progress("authenticating", 0);
     if read(&mut ws, &mut budget)?["type"] != "auth_required" {
         return Err("history-auth-protocol");
     }
@@ -927,6 +934,7 @@ fn query_entity_history(
     }
     let mut start = start;
     let mut id = 1_u64;
+    progress("querying", 0);
     while start < end {
         // Smaller daily chunks keep extended attributes below the 1 MiB frame limit.
         let chunk_end = (start + chunk * 60_000).min(end);
@@ -949,6 +957,7 @@ fn query_entity_history(
             return Err("history-query-rejected");
         }
         append(&result["result"], start, chunk_end)?;
+        progress("querying", id as u32);
         start = chunk_end;
         id += 1;
     }
@@ -1084,7 +1093,15 @@ mod recorded_history_tests {
                 .unwrap();
             }
         });
-        let result = recorded_reported_with_token(&config, &AtomicBool::new(false), end, "fixture-token").unwrap();
+        let mut progress = Vec::new();
+        let result =
+            recorded_reported_with_token(&config, &AtomicBool::new(false), end, "fixture-token", |phase, n| {
+                progress.push((phase, n));
+            })
+            .unwrap();
+        assert_eq!(progress.first(), Some(&("connecting", 0)));
+        assert_eq!(progress.get(1), Some(&("authenticating", 0)));
+        assert_eq!(progress.last(), Some(&("querying", 3)));
         assert_eq!(result.import_wh, 0);
         assert_eq!(result.export_wh, 0);
         assert_eq!(result.as_of, end);

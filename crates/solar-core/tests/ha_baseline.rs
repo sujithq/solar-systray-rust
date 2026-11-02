@@ -122,6 +122,17 @@ fn cache_restores_baseline_before_live_data_and_rejects_source_changes() {
         Some("history-no-completed-night-or-location")
     );
     service.stop();
+    let history_status_path = path.with_extension("daily-energy.reported-history-status.json");
+    for _ in 0..200 {
+        let cancelled = std::fs::read(&history_status_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|status| status["phase"] == "cancelled");
+        if cancelled {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     save_cache(&path, &c, &baseline).unwrap();
     for mutation in 0..4 {
         let mut changed = c.clone();
@@ -140,6 +151,7 @@ fn cache_restores_baseline_before_live_data_and_rejects_source_changes() {
     std::fs::write(&path, vec![b'x'; 8193]).unwrap();
     assert_eq!(load_cache(&path, &c, now), Err("history-cache-invalid"));
     std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(history_status_path).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
 
