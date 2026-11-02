@@ -378,6 +378,23 @@ fn peak_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn today_rows(s: &Snapshot) -> Vec<Row> {
+    if let Some(reported) = &s.reported_energy {
+        let age = (s.checked_at - reported.as_of).max(0) / 1000;
+        let mut rows = vec![
+            row("Coverage", "HA recorded reported energy; held midnight boundary", Tone::Warn),
+            row("Imported", kilowatt_hours(reported.import_wh), Tone::Text),
+            row("Exported", kilowatt_hours(reported.export_wh), Tone::Text),
+            row("From", meter_instant(reported.day_start), Tone::Muted),
+            row("As of", meter_instant(reported.as_of), Tone::Muted),
+            row("Source", "Original HA tariff recorder states (kWh -> whole Wh); not atomic acquisition", Tone::Muted),
+            row("Boundary", "HA last recorded state held at midnight; physical boundary timing unverified", Tone::Warn),
+            row("Refresh age", format!("{age}s{}", if age > 120 { "; stale retained result" } else { "" }), Tone::Warn),
+        ];
+        if let Some(issue) = &s.reported_energy_issue {
+            rows.push(row("Recorded energy refresh", issue, Tone::Warn));
+        }
+        return rows;
+    }
     let d = &s.daily_energy;
     match (live(s) && d.available, d.import_wh, d.export_wh, d.since_minute) {
         (true, Some(import), Some(export), Some(since)) => {
@@ -400,6 +417,9 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
                 }
                 if let Some(issue) = &s.daily_history_issue {
                     rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+                }
+                if let Some(issue) = &s.reported_energy_issue {
+                    rows.push(row("HA reported energy", issue, Tone::Warn));
                 }
             }
             rows.extend([
@@ -424,6 +444,9 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
             }
             if let Some(issue) = &s.daily_history_issue {
                 rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+            }
+            if let Some(issue) = &s.reported_energy_issue {
+                rows.push(row("HA reported energy", issue, Tone::Warn));
             }
             rows
         }
@@ -618,7 +641,13 @@ pub fn tooltip(s: &Snapshot) -> String {
             lines.push(format!("Quarter {} / {}", kilowatts(projected), kilowatts(comparison)));
         }
         let d = &s.daily_energy;
-        if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
+        if let Some(reported) = &s.reported_energy {
+            lines.push(format!(
+                "HA reported in {} / out {}",
+                kilowatt_hours(reported.import_wh).trim_end_matches(" kWh"),
+                kilowatt_hours(reported.export_wh)
+            ));
+        } else if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
             lines.push(format!(
                 "{} in {} / out {}",
                 if s.home_assistant.is_some() && !s.daily_coverage.as_ref().is_some_and(|coverage| coverage.midnight) {

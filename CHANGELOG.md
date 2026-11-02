@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HA Today now queries the original cumulative day/night tariff recorder
+  entities for a separately labeled reported-energy total using HA's held
+  midnight start state. Older history no longer unnecessarily depends on the
+  recently added atomic counter schema or an event exactly at midnight.
+  Import/export tariff sums remain directional, with reset checks and explicit
+  source/as-of/stale labels; live grid freshness is unchanged.
 - HA heartbeat commands now use strictly increasing IDs instead of reusing ID 3.
   Reusing the second heartbeat ID caused HA to reject the command and the client
   to reconnect. Pongs remain strictly correlated; invalid responses still fail closed.

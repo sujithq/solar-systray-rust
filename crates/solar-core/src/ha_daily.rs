@@ -446,9 +446,19 @@ fn save_cache(path: &Path, config: &SolarConfig, baseline: &CounterBaseline) -> 
 
 pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, path: Option<&Path>, config: &SolarConfig) {
     let mut saved = None;
+    let mut reported_at = None;
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             return;
+        }
+        let now = crate::now_ms();
+        if reported_at.is_none_or(|at| now - at >= 60_000) && lock(runtime).reported_history_ready(now) {
+            let result = crate::home_assistant::recorded_reported_energy(config, stop, now - 10_000);
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            lock(runtime).set_reported_energy(result, crate::now_ms());
+            reported_at = Some(crate::now_ms());
         }
         let request = lock(runtime).daily_history_request(crate::now_ms());
         if let Some(request) = request {

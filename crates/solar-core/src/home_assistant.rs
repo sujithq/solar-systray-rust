@@ -806,11 +806,88 @@ fn query_history(
     token: &str,
     start: i64,
     end: i64,
-    mut budget: usize,
+    budget: usize,
     mut append: impl FnMut(&Value, i64, i64) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
+    let chunk_minutes = if budget > 32 * MAX_MESSAGE { 5 } else { 15 };
+    query_entity_history(
+        config,
+        stop,
+        token,
+        HistoryQuery {
+            start,
+            end,
+            budget,
+            chunk_minutes,
+            entities: vec![config.home_assistant.atomic_grid.clone()],
+            include_start: false,
+        },
+        &mut append,
+    )
+}
+
+struct HistoryQuery {
+    start: i64,
+    end: i64,
+    budget: usize,
+    chunk_minutes: i64,
+    entities: Vec<String>,
+    include_start: bool,
+}
+
+pub(crate) fn recorded_reported_energy(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    end: i64,
+) -> Result<crate::ha_reported_energy::ReportedEnergy, &'static str> {
+    let token = std::env::var(&config.home_assistant.token_env).map_err(|_| "history-token-missing")?;
+    if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
+        return Err("history-token-invalid");
+    }
+    recorded_reported_with_token(config, stop, end, &token)
+}
+
+fn recorded_reported_with_token(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    end: i64,
+    token: &str,
+) -> Result<crate::ha_reported_energy::ReportedEnergy, &'static str> {
+    let (start, _) = crate::ha_daily::day_bounds(end).ok_or("reported-energy-calendar")?;
     let ha = &config.home_assistant;
-    let chunk = if budget > 32 * MAX_MESSAGE { 5 } else { 15 };
+    let entities = [
+        ha.energy_import_tariff1.clone(),
+        ha.energy_import_tariff2.clone(),
+        ha.energy_export_tariff1.clone(),
+        ha.energy_export_tariff2.clone(),
+    ];
+    let mut samples = crate::ha_reported_energy::ReportedSamples::new(start, end, entities.clone())?;
+    query_entity_history(
+        config,
+        stop,
+        token,
+        HistoryQuery {
+            start,
+            end,
+            budget: 128 * MAX_MESSAGE,
+            chunk_minutes: 5,
+            entities: entities.to_vec(),
+            include_start: true,
+        },
+        |result, start, end| samples.append(result, start, end),
+    )?;
+    samples.finish()
+}
+
+fn query_entity_history(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    token: &str,
+    query: HistoryQuery,
+    mut append: impl FnMut(&Value, i64, i64) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let HistoryQuery { start, end, mut budget, chunk_minutes: chunk, entities, include_start } = query;
+    let ha = &config.home_assistant;
     let overall = Instant::now() + Duration::from_secs(180);
     let mut ws = open(ha).map_err(|_| "history-connect-or-tls")?;
     let read = |ws: &mut Socket, budget: &mut usize| -> Result<Value, &'static str> {
@@ -859,8 +936,8 @@ fn query_history(
             json!({
                 "id":id,"type":"history/history_during_period",
                 "start_time":iso(start),"end_time":iso(chunk_end),
-                "entity_ids":[ha.atomic_grid],
-                "include_start_time_state":false,"significant_changes_only":false,
+                "entity_ids":entities,
+                "include_start_time_state":include_start,"significant_changes_only":false,
                 "minimal_response":false,"no_attributes":false
             }),
         )?;
@@ -961,6 +1038,57 @@ mod recorded_history_tests {
             "import_tariff_2":"available","export_tariff_1":"available","export_tariff_2":"available"
         });
         state
+    }
+
+    #[test]
+    fn original_tariff_history_requests_held_boundary_states_and_accepts_static_values() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = config();
+        config.home_assistant.endpoint = format!("ws://{}/api/websocket", listener.local_addr().unwrap());
+        let start = utc_timestamp("2027-01-14T23:00:00Z").unwrap();
+        let end = start + 650_000;
+        let ids = [
+            config.home_assistant.energy_import_tariff1.clone(),
+            config.home_assistant.energy_import_tariff2.clone(),
+            config.home_assistant.energy_export_tariff1.clone(),
+            config.home_assistant.energy_export_tariff2.clone(),
+        ];
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            ws.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+            let _ = ws.read().unwrap();
+            ws.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).unwrap();
+            for n in 0..3 {
+                let query: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(query["entity_ids"], json!(ids));
+                assert_eq!(query["include_start_time_state"], true);
+                assert_eq!(query["minimal_response"], false);
+                assert_eq!(query["no_attributes"], false);
+                assert_eq!(query["significant_changes_only"], false);
+                let from = utc_timestamp(query["start_time"].as_str().unwrap()).unwrap();
+                assert_eq!(from, start + n * 300_000);
+                let mut result = serde_json::Map::new();
+                for id in &ids {
+                    // HA projects an older retained state to the requested boundary.
+                    result.insert(
+                        id.clone(),
+                        json!([{"s":"10.000","lu":from as f64/1000.0,
+                        "a":{"unit_of_measurement":"kWh","device_class":"energy","state_class":"total_increasing"}}]),
+                    );
+                }
+                ws.send(Message::Text(
+                    json!({"id":query["id"],"type":"result","success":true,"result":result}).to_string().into(),
+                ))
+                .unwrap();
+            }
+        });
+        let result = recorded_reported_with_token(&config, &AtomicBool::new(false), end, "fixture-token").unwrap();
+        assert_eq!(result.import_wh, 0);
+        assert_eq!(result.export_wh, 0);
+        assert_eq!(result.as_of, end);
+        server.join().unwrap();
     }
 
     #[test]

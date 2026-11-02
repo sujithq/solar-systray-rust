@@ -314,8 +314,11 @@ and separate HA entities, heartbeats or cached states cannot fill them.
 The earlier six separate mappings (`currentDemand`, `monthlyPeak`,
 `energyImportTariff1/2`, `energyExportTariff1/2`) and
 `meterDataStaleSeconds`/`meterDataMaxEventSkewSeconds` remain accepted and
-round-tripped for configuration compatibility but are no longer subscribed to
-or used for these features. No new mappings or private-config changes are needed.
+round-tripped for configuration compatibility but are not subscribed to for
+live atomic features. The four `energy*Tariff*` mappings select the separate
+reported-energy history source below; `currentDemand`, `monthlyPeak` and the
+old event-age/skew settings do not supply atomic optional data.
+No new mappings or private-config changes are needed.
 
 The quarter-hour engine uses the atomic grid import, validated current-demand
 and current-month-peak states, and the meter clock. **Today** uses differences
@@ -329,7 +332,56 @@ Live acceptance still requires observing extended telegrams, unchanged optional
 values across advancing sequences, unavailable/recovery behavior, month identity
 and partial counter deltas. Physical measurement correctness remains unverified.
 
-#### Recorded Today baseline and exact coverage
+#### HA reported daily energy from original tariff history
+
+The primary **Today** display can recover the older original HA tariff recorder
+history, independently of when the additive atomic publisher was installed.
+It queries the configured four `energy*Tariff*` entities via authenticated
+`history/history_during_period` WebSockets with `include_start_time_state:true`,
+`significant_changes_only:false`, `minimal_response:false`, and full attributes.
+HA's recorder supplies the last known state at/before the requested boundary,
+projected to that boundary. An event exactly at midnight is **not** required for
+this reported-state calculation. See the upstream
+[history WebSocket API](https://github.com/home-assistant/core/blob/dev/homeassistant/components/history/websocket_api.py)
+and [recorder boundary-state implementation](https://github.com/home-assistant/core/blob/dev/homeassistant/components/recorder/history/__init__.py).
+
+This view is labeled **HA recorded reported energy; held midnight boundary**,
+not exact atomic midnight acquisition. It subtracts the held Brussels-midnight
+value from the last recorded value before a fixed query cutoff, separately for
+each `kWh`/`energy`/`total_increasing` entity (whole-Wh precision), then adds
+**import tariff 1 + import tariff 2** for imported energy and **export tariff 1 +
+export tariff 2** for exported energy. Inactive day/night tariffs with no changes
+are valid zero deltas. Chart-negative production does not establish a negative
+raw counter convention: negative counters and decreases/resets are rejected,
+never absolute-valued. Adding import and export magnitudes would be grid
+throughput, not net import or household consumption.
+
+The query starts at Brussels local midnight and ends ten seconds before its
+request time, including recorded changes in the current incomplete hour; it
+does not round to hours, mix statistics with raw history, or add overlapping
+atomic/live deltas. The display shows the exact period/as-of time, whole-Wh
+precision, provenance and refresh age. Recorded held values are not proof of
+physical freshness, same-telegram coherence or uninterrupted acquisition.
+Unknown/unavailable values, wrong units/classes, missing boundary/entity rows,
+unordered events, inconsistent chunk boundaries or a counter decrease prevent
+publishing a new reported total. Missing recorder events/physical outages that
+HA never recorded cannot be detected from held history; this is explicitly a
+reported-state view, not a reconstruction of missing physical energy.
+
+Queries refresh no more often than once per minute (plus query duration) on the
+independent history worker, bounded to one 23/24/25-hour local day, five-minute
+chunks, 1 MiB messages, 128 MiB aggregate text, 100,000 rows, 20-second command
+and 180-second overall deadlines. No REST, database, hardware read or HA write
+is used. A same-day prior result is retained with explicit refresh error/as-of
+age (stale after 120 seconds); old-day results are discarded. Restart requeries
+the original recorder rather than depending on new atomic history. This does
+not modify the private atomic/night caches, settings, or night-baseline logic.
+If reported history is unavailable, the separately labeled atomic partial/exact
+view below remains available; errors do not change grid/GO/household/forecast.
+History existence in an HA graph does not itself verify these four entities'
+coverage or reset convention, and this implementation makes no live access claim.
+
+#### Atomic Today baseline and exact coverage
 
 On startup, day rollover and recovery, the client tries to recover recorded
 atomic counters through an independent authenticated **WebSocket-only**

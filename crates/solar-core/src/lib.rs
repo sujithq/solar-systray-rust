@@ -10,6 +10,7 @@ pub mod decision;
 pub mod dsmr;
 pub mod ha_baseline;
 pub mod ha_daily;
+pub mod ha_reported_energy;
 pub mod home_assistant;
 pub mod mock;
 pub mod night_baseline;

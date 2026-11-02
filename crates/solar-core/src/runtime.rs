@@ -32,6 +32,10 @@ pub struct Snapshot {
     pub daily_coverage: Option<crate::ha_daily::DailyCoverage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_history_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_energy_issue: Option<String>,
     pub simulated: bool,
     pub scenario: Option<String>,
     pub simulated_w: Option<i64>,
@@ -75,6 +79,8 @@ pub struct Runtime {
     forecaster: PeakForecaster,
     daily_energy: DailyEnergy,
     ha_daily: Option<crate::ha_daily::HaDaily>,
+    reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
+    reported_energy_issue: Option<String>,
     night_baseline: NightBaseline,
     baseline_history: Option<crate::ha_baseline::HistoryStatus>,
     sun_times: Option<(i64, SunTimes)>,
@@ -93,6 +99,8 @@ impl Runtime {
             .then(crate::ha_baseline::HistoryStatus::default);
         Runtime {
             ha_daily: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty()).then(Default::default),
+            reported_energy: None,
+            reported_energy_issue: None,
             engine: DecisionEngine::new(config.clone()),
             config,
             meter,
@@ -140,6 +148,35 @@ impl Runtime {
     pub(crate) fn daily_history_issue(&mut self, issue: &'static str) {
         if let Some(daily) = &mut self.ha_daily {
             daily.set_issue(issue);
+        }
+    }
+
+    pub(crate) fn set_reported_energy(
+        &mut self,
+        result: Result<crate::ha_reported_energy::ReportedEnergy, &'static str>,
+        now: i64,
+    ) {
+        match result {
+            Ok(value)
+                if crate::ha_daily::day_bounds(value.as_of) == crate::ha_daily::day_bounds(now)
+                    && value.as_of <= now =>
+            {
+                self.reported_energy = Some(value);
+                self.reported_energy_issue = None;
+            }
+
+            Ok(_) => self.reported_energy_issue = Some("reported-energy-old-day-result".into()),
+            Err(issue) => self.reported_energy_issue = Some(issue.into()),
+        }
+    }
+
+    pub(crate) fn reported_history_ready(&self, now: i64) -> bool {
+        match &self.meter {
+            Meter::HomeAssistant(state) => {
+                let diagnostics = state.diagnostics(now, self.config.decision.stale_after_seconds);
+                diagnostics.connected && diagnostics.initialized
+            }
+            _ => false,
         }
     }
 
@@ -450,6 +487,12 @@ impl Runtime {
             daily_energy,
             daily_coverage: self.ha_daily.as_ref().and_then(|daily| daily.coverage()),
             daily_history_issue: self.ha_daily.as_ref().and_then(|daily| daily.history_issue().map(str::to_string)),
+            reported_energy: self
+                .reported_energy
+                .as_ref()
+                .filter(|value| crate::ha_daily::day_bounds(value.as_of) == crate::ha_daily::day_bounds(now))
+                .cloned(),
+            reported_energy_issue: self.reported_energy_issue.clone(),
             simulated: self.config.is_mock(),
             scenario: mock.map(|m| m.scenario().to_string()),
             simulated_w: mock.filter(|m| m.scenario() == "custom").and_then(MockProvider::watts),
