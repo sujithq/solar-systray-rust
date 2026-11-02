@@ -242,10 +242,13 @@ it does not prove a same-telegram read or simultaneous physical acquisition.
 Snapshots, equal values, `last_updated`, `last_reported`, unrelated entities,
 heartbeats and connectivity do not refresh optional data. After reconnect, new
 live changes are required again. Event-driven monthly peaks and unchanged tariff
-counters can therefore leave these features unavailable; the tray reports the
-specific missing, stale, invalid, month/day-boundary or proximity gate rather
-than relaxing it. Optional-data failure never changes atomic grid freshness or
-GO eligibility.
+counters can therefore leave these features unavailable indefinitely; relaunching
+does not create acquisition evidence. The tray reports when an unchanged value has
+no acquisition evidence rather than suggesting that waiting or restarting will
+make it fresh. Reliable operation requires the atomic publisher to include demand,
+peak and tariff counters under the same advancing sample sequence; separate HA
+entity changes cannot reliably support these features. Optional-data failure
+never changes atomic grid freshness or GO eligibility.
 
 The quarter-hour engine uses the atomic grid import, validated current-demand
 and current-month-peak states, and the meter clock. Daily energy reuses the

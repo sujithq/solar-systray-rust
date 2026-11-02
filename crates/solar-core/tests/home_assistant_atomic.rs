@@ -196,6 +196,53 @@ fn counter_decrease_invalidates_partial_totals_without_affecting_atomic_grid() {
 }
 
 #[test]
+fn unchanged_optional_values_explain_missing_acquisition_evidence_in_the_tray() {
+    let mut runtime = runtime();
+    let at = AT + 5 * 60_000;
+    for (id, value, unit) in [
+        (DEMAND, "0.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        runtime.ha_snapshot_state(id, &meter_value(id, value, unit, at), at);
+    }
+
+    runtime.ha_state(GRID, &sample("meter-features", 1, at, 0.0, 0.0), at);
+    let first = runtime.snapshot(at);
+    assert_eq!(first.daily_energy.reason, "ha-meter-data-no-acquisition-evidence");
+    assert_eq!(first.peak_forecast.reason, "ha-meter-data-no-acquisition-evidence");
+    let info = solar_info(&first);
+    assert_eq!(
+        info.section("Today").unwrap().value("Why"),
+        Some("unchanged counters have no acquisition evidence; atomic samples are required")
+    );
+    assert_eq!(
+        info.section("Quarter-hour peak").unwrap().value("Forecast"),
+        Some("unchanged HA value; no acquisition evidence")
+    );
+
+    let next_at = at + 1000;
+    runtime.ha_state(GRID, &sample("meter-features", 2, next_at, 0.0, 0.0), next_at);
+    for (id, value, unit) in [
+        (DEMAND, "0.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        runtime.ha_state(id, &meter_value(id, value, unit, at), next_at);
+    }
+    let next = runtime.snapshot(next_at);
+    assert_eq!(next.daily_energy.reason, "ha-meter-data-no-acquisition-evidence");
+    assert_eq!(next.peak_forecast.reason, "ha-meter-data-no-acquisition-evidence");
+    assert_ne!(next.evaluation.state, State::Offline, "the optional-data gate cannot invalidate the grid");
+}
+
+#[test]
 fn optional_entities_crossing_brussels_day_or_month_boundary_fail_closed() {
     let mut state = online();
     let grid_time = chrono::DateTime::parse_from_rfc3339("2027-01-31T22:59:50Z").unwrap().timestamp_millis();
@@ -275,8 +322,8 @@ fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after
     ] {
         state.state(id, &meter_value(id, value, unit, at), live_at);
     }
-    assert_eq!(state.peak_data_issue(live_at), Some("ha-meter-data-awaiting-live-change"));
-    assert_eq!(state.daily_data_issue(live_at), Some("ha-meter-data-awaiting-live-change"));
+    assert_eq!(state.peak_data_issue(live_at), Some("ha-meter-data-no-acquisition-evidence"));
+    assert_eq!(state.daily_data_issue(live_at), Some("ha-meter-data-no-acquisition-evidence"));
 
     for (id, value, unit) in [
         (DEMAND, "2.1", "kW"),

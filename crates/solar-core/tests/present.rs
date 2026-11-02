@@ -7,7 +7,8 @@ use solar_core::home_assistant::{EntityDiagnostic, HaDiagnostics};
 use solar_core::mock::MOCK_SCENARIOS;
 use solar_core::peak_forecast::Forecast;
 use solar_core::present::{
-    Info, TOOLTIP_MAX, Tone, countdown, fit_tooltip, headline, kilowatt_hours, solar_info, to_fixed, tooltip,
+    Info, TOOLTIP_MAX, Tone, countdown, daily_reason_text, fit_tooltip, forecast_reason_text, headline, kilowatt_hours,
+    solar_info, to_fixed, tooltip,
 };
 use solar_core::runtime::{Runtime, Snapshot};
 use solar_core::sun::Sun;
@@ -181,6 +182,14 @@ fn headline_follows_the_device_decision_order() {
 
 #[test]
 fn info_explains_unavailable_totals_forecast_warnings_and_offline_readings() {
+    assert_eq!(
+        daily_reason_text("ha-meter-data-no-acquisition-evidence"),
+        Some("unchanged counters have no acquisition evidence; atomic samples are required")
+    );
+    assert_eq!(
+        forecast_reason_text("ha-meter-data-no-acquisition-evidence"),
+        "unchanged HA value; no acquisition evidence"
+    );
     let unavailable = solar_info(&snapshot(|s| s.daily_energy = DailyEnergyResult::unavailable("missing-meter-time")));
     assert_eq!(
         rows(&unavailable, "Today"),

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HA heartbeat commands now use strictly increasing IDs instead of reusing ID 3.
   Reusing the second heartbeat ID caused HA to reject the command and the client
   to reconnect. Pongs remain strictly correlated; invalid responses still fail closed.
+- HA peak/daily diagnostics now explain that unchanged optional states provide no
+  acquisition evidence and that reliable operation needs those values in atomic
+  publisher samples; waiting or relaunching cannot make cached values fresh.
 
 ### Added
 

@@ -876,7 +876,7 @@ impl HaState {
                 return Some("ha-meter-data-invalid");
             }
             if !self.live_changes[index] {
-                return Some("ha-meter-data-awaiting-live-change");
+                return Some("ha-meter-data-no-acquisition-evidence");
             }
             let Some(sample) = self.samples[index].as_ref() else {
                 return Some("ha-meter-data-unavailable");

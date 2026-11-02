@@ -192,7 +192,14 @@ impl Runtime {
     // Every reading feeds the forecaster so its hold time follows the meter clock, not polling.
     fn forecast(&mut self, reading: Option<&Reading>, now: i64) -> Forecast {
         let fresh = self.fresh(reading, now);
-        self.forecaster.update(Some(&peak_forecast_sample(reading, fresh)))
+        let mut forecast = self.forecaster.update(Some(&peak_forecast_sample(reading, fresh)));
+        if forecast.reason == "no-demand"
+            && let Meter::HomeAssistant(state) = &self.meter
+            && state.peak_data_issue(now) == Some("ha-meter-data-no-acquisition-evidence")
+        {
+            forecast.reason = "ha-meter-data-no-acquisition-evidence".into();
+        }
+        forecast
     }
 
     // Crossings move by about a minute a day, so they are worked out once a minute.

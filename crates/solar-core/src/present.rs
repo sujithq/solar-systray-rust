@@ -77,7 +77,7 @@ pub fn forecast_reason_text(reason: &str) -> &'static str {
         "ha-meter-clock-unsupported" => "unsupported meter date",
         "ha-meter-data-not-mapped" => "meter entity not mapped",
         "ha-meter-data-invalid" => "invalid meter entity",
-        "ha-meter-data-awaiting-live-change" => "awaiting live meter value change",
+        "ha-meter-data-no-acquisition-evidence" => "unchanged HA value; no acquisition evidence",
         "ha-meter-data-unavailable" => "meter entity unavailable",
         "ha-meter-data-stale" => "meter entity state-change is stale",
         "ha-meter-data-event-proximity" => "outside HA event-proximity window",
@@ -101,7 +101,9 @@ pub fn daily_reason_text(reason: &str) -> Option<&'static str> {
         "ha-meter-clock-unsupported" => "the meter timestamp is outside the supported calendar",
         "ha-meter-data-not-mapped" => "one or more energy counters are not mapped",
         "ha-meter-data-invalid" => "an energy counter is invalid",
-        "ha-meter-data-awaiting-live-change" => "waiting for live counter value changes",
+        "ha-meter-data-no-acquisition-evidence" => {
+            "unchanged counters have no acquisition evidence; atomic samples are required"
+        }
         "ha-meter-data-unavailable" => "an energy counter is unavailable",
         "ha-meter-data-stale" => "an energy counter state-change is stale",
         "ha-meter-data-event-proximity" => "counter events are outside the HA event-proximity window",
