@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Separate everyday Windows HA launcher with hidden child-only token entry,
+  current-checkout build and duplicate-instance checks. It returns control
+  without an automatic timeout; the tray stays running until Quit independently
+  of the existing bounded smoke workflow.
+
 ### Fixed
 
 - Advisory HA reported night estimates now accept at least 95% fully available

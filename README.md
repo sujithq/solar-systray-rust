@@ -728,6 +728,35 @@ applies: exit another tray instance yourself first. Keep the existing HA token i
 the configured process environment reference, never in the JSON. This is a config
 override, not proof of native UI or live surplus acceptance.
 
+For everyday HA use on Windows with PowerShell 7, run the source-checkout
+launcher with an existing isolated config (neutral example):
+
+```powershell
+pwsh -NoProfile -File .\scripts\Start-HaTray.ps1 -ConfigPath 'C:\Solar\Config\ha.json'
+```
+
+Optionally pass `-ExpectedBranch 'your-feature-branch'` to reject a different
+checkout branch. The launcher uses its own repository root, checks for an
+existing tray, and builds the current checkout before requesting the **existing**
+HA token at a hidden prompt. Build failure never falls back to a stale binary.
+The token and config override are passed only into the child process environment;
+the launcher never saves a credential or changes config, caches, autostart or
+scheduled tasks. The tray performs its usual complete config validation.
+Exit an existing instance with **Quit** yourself before launching/updating;
+neither launcher nor build deliberately stops an existing instance. The native
+single-instance guard also handles a competing launch.
+
+The everyday launcher returns after confirming the process has not immediately
+exited. There is **no six-minute timeout** and no cleanup that kills the tray.
+Use **Quit** in the tray menu to end it. Closing an ordinary PowerShell terminal
+after the launcher returns does not stop the independent GUI process; signing
+out/shutdown or a host/job manager that explicitly kills descendant processes
+still can. A started process is not proof of HA connection—inspect the tray.
+Keep any bounded six-minute smoke launcher separate for diagnostics; that
+launcher intentionally owns and ends its child at its bound. Launcher-only
+checks use `pwsh -NoProfile -File .\scripts\Test-HaTrayLauncher.ps1` with synthetic
+subprocesses, without starting the tray or accessing HA.
+
 Edit the file with **Open config file**, then choose **Reload config**. If the file is
 invalid, the icon turns grey with a warning dot and the menu shows the error.
 
