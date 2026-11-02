@@ -241,11 +241,11 @@ without supported crossings produce an explicit unavailable status.
 
 History is fetched using a **separate authenticated WebSocket** connection and
 HA's [`history/history_during_period` command](https://github.com/home-assistant/core/blob/dev/homeassistant/components/history/websocket_api.py).
-Only the configured atomic grid entity is requested, with full attributes,
+The preferred source is the configured atomic grid entity, with full attributes,
 non-minimal responses and attribute changes included. The recorder must retain
 the schema-v1 sequence/session, both powers and acquisition timestamps. Merely
 having 10 days of recorder retention does not prove that these atomic attributes
-were recorded; actual availability still needs a user-run check. No REST,
+were recorded. No REST,
 database reads, direct hardware or Solar Agent fallback is used.
 
 The statistic preserves the existing night learner: **median of the first real
@@ -258,15 +258,39 @@ Unknown/unavailable, missing attributes, replay, incomplete coverage and errors
 reject the candidate, rather than filling gaps or treating them as zero.
 Five-minute/hourly statistics or means are **not** substitutes for this median.
 
+When atomic acquisition attributes or coverage are unavailable, a separate
+query can use the configured **gridImport** power entity (`kW`, device class
+`power`, state class `measurement`). This is explicitly a **reported-history
+estimate**, not the atomic/acquired baseline. HA's held start-state is requested
+at each chunk boundary; each UTC minute samples the recorded state held at its
+start. Thus a constant recorded value contributes one value per minute, without
+requiring a numerical change or pretending the held state was newly acquired.
+The median still uses minute values, never hourly/five-minute means. Duration
+influences the number of repeated minute samples, not an event-count median.
+
+The reported estimate requires **100% recorded availability** over the same
+completed sunset-to-sunrise observation window and at least 30 minute samples.
+Every chunk needs a valid held boundary and ordered events (fractional
+milliseconds accepted). Missing history, any explicit `unknown`/`unavailable`
+interval, malformed/negative/out-of-range power, wrong metadata, inconsistent
+chunk boundaries or incomplete coverage rejects it; outages are not bridged or
+filled with zero. Silence while a valid state is held is allowed only as HA's
+reported-state semantics: unrecorded physical outages/cache cannot be detected,
+so no physical freshness/continuity claim is made. Authentication, transport and
+protocol failures do not trigger this alternative source. Actual overnight
+legacy power availability remains a live acceptance requirement.
+
 Requests use 15-minute chunks, the existing 1 MiB message bound, at most 32 MiB
 aggregate response data, a 20-second response timeout and a 180-second overall
-retrieval deadline. Failure affects only the baseline, never live grid/GO.
+retrieval deadline per source attempt. Failure affects only the baseline, never live grid/GO.
 Historical data is never submitted as a live measurement.
 
 The cache lives beside the selected tray config, with its extension replaced by
 `.night-baseline.json` (including isolated HA configs). It contains only the
 baseline, W unit, observation window, calculation time, sample count, provenance
-and source/config identity, never the token or raw history. Source/entity,
+and source/config identity, never the token or raw history. Atomic and reported
+provenance are distinct; the source identity includes both selected entities
+and the statistic policy (older-policy caches are invalidated once). Source/entity,
 location or refresh-time changes invalidate a mismatching cache. A failed
 refresh preserves a prior matching result and displays the error; the menu shows
 the recorded night, age and sample count, with results older than 36 hours

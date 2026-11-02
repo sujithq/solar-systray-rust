@@ -16,6 +16,8 @@ use std::time::Duration;
 
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
+pub const ATOMIC_PROVENANCE: &str = "HA recorder atomic grid import; first sample per UTC minute median";
+pub const REPORTED_PROVENANCE: &str = "HA reported grid import estimate; held UTC-minute-start median; full recorded availability, physical acquisition unverified";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,12 +105,13 @@ fn identity(config: &SolarConfig) -> Value {
     json!({
         "endpoint": config.home_assistant.endpoint,
         "entity": config.home_assistant.atomic_grid,
+        "reportedEntity": config.home_assistant.grid_import,
         "tokenReference": config.home_assistant.token_env,
         "latitude": config.location.latitude,
         "longitude": config.location.longitude,
         "refreshAt": config.home_assistant.night_baseline_refresh_at,
         "timezone": "Europe/Brussels",
-        "statistic": "first-atomic-grid-import-per-utc-minute-median-v1"
+        "statistic": "atomic-first-or-reported-held-utc-minute-median-v2"
     })
 }
 
@@ -140,7 +143,7 @@ pub fn load_cache(path: &Path, config: &SolarConfig, now: i64) -> Result<Option<
         || !(0.0..=1_000_000.0).contains(&b.watts)
         || !(MIN_NIGHT_SAMPLES..=1441).contains(&b.samples)
         || b.unit != "W"
-        || b.provenance != "HA recorder atomic grid import; first sample per UTC minute median"
+        || ![ATOMIC_PROVENANCE, REPORTED_PROVENANCE].contains(&b.provenance.as_str())
         || b.window.start <= 0
         || b.window.end <= b.window.start
         || b.window.end - b.window.start > DAY
@@ -248,7 +251,111 @@ impl NightSamples {
             watts,
             samples: values.len(),
             unit: "W".into(),
-            provenance: "HA recorder atomic grid import; first sample per UTC minute median".into(),
+            provenance: ATOMIC_PROVENANCE.into(),
+        })
+    }
+}
+
+/// Sample HA's reported held state at minute starts, not new physical readings.
+pub(crate) struct ReportedNightSamples {
+    window: NightWindow,
+    entity: String,
+    values: Vec<f64>,
+    held: Option<f64>,
+    through: i64,
+    records: usize,
+}
+
+impl ReportedNightSamples {
+    pub(crate) fn new(window: NightWindow, entity: String) -> Result<Self, &'static str> {
+        if entity.is_empty()
+            || window.start.rem_euclid(MINUTE) != 0
+            || window.end.rem_euclid(MINUTE) != 0
+            || window.end <= window.start
+            || window.end - window.start > DAY
+        {
+            return Err("reported-night-window-or-mapping");
+        }
+        Ok(Self { window, entity, values: Vec::new(), held: None, through: window.start, records: 0 })
+    }
+
+    pub(crate) fn append(&mut self, result: &Value, start: i64, end: i64) -> Result<(), &'static str> {
+        if start != self.through || end <= start || end > self.window.end {
+            return Err("reported-night-window");
+        }
+        let object = result.as_object().ok_or("reported-night-shape")?;
+        if object.keys().any(|id| id != &self.entity) {
+            return Err("reported-night-entity");
+        }
+        let rows = object.get(&self.entity).and_then(Value::as_array).ok_or("reported-night-missing-boundary")?;
+        if rows.is_empty() || rows.len() > 10_000 {
+            return Err("reported-night-missing-boundary");
+        }
+        let mut next_minute = start;
+        let mut previous_at = None;
+        for (index, row) in rows.iter().enumerate() {
+            self.records += 1;
+            if self.records > 100_000 {
+                return Err("reported-night-record-limit");
+            }
+            let at = row["lu"].as_f64().filter(|v| v.is_finite()).ok_or("reported-night-time")? * 1000.0;
+            if at < start as f64 || at >= end as f64 || previous_at.is_some_and(|last| at <= last) {
+                return Err("reported-night-time");
+            }
+            let state = row["s"].as_str().ok_or("reported-night-invalid-power")?;
+            if matches!(state, "unknown" | "unavailable") {
+                return Err("reported-night-unavailable-coverage");
+            }
+            let attributes = &row["a"];
+            // Only raw power is eligible, never cumulative energy or statistics.
+            if attributes["unit_of_measurement"] != "kW"
+                || attributes["device_class"] != "power"
+                || attributes["state_class"] != "measurement"
+            {
+                return Err("reported-night-unit-or-class");
+            }
+            let watts = state.parse::<f64>().map_err(|_| "reported-night-invalid-power")? * 1000.0;
+            if !watts.is_finite() || !(0.0..=1_000_000.0).contains(&watts) {
+                return Err("reported-night-invalid-power");
+            }
+            if index == 0 {
+                if (at - start as f64).abs() > 0.01 {
+                    return Err("reported-night-missing-boundary");
+                }
+                if self.held.is_some_and(|held| held != watts) {
+                    return Err("reported-night-boundary-mismatch");
+                }
+            } else {
+                while (next_minute as f64) < at {
+                    self.values.push(self.held.ok_or("reported-night-missing-boundary")?);
+                    next_minute += MINUTE;
+                }
+            }
+            self.held = Some(watts);
+            previous_at = Some(at);
+        }
+        while next_minute < end {
+            self.values.push(self.held.ok_or("reported-night-missing-boundary")?);
+            next_minute += MINUTE;
+        }
+        self.through = end;
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, now: i64) -> Result<RecordedBaseline, &'static str> {
+        if self.through != self.window.end
+            || self.values.len() < MIN_NIGHT_SAMPLES
+            || self.values.len() as i64 != (self.window.end - self.window.start) / MINUTE
+        {
+            return Err("reported-night-incomplete-coverage");
+        }
+        Ok(RecordedBaseline {
+            window: self.window,
+            calculated_at: now,
+            watts: median(&self.values),
+            samples: self.values.len(),
+            unit: "W".into(),
+            provenance: REPORTED_PROVENANCE.into(),
         })
     }
 }
@@ -268,9 +375,6 @@ pub(crate) fn worker(
         let now = crate::now_ms();
         if schedule.due(now, &config.home_assistant.night_baseline_refresh_at) {
             let result = (|| {
-                if config.home_assistant.atomic_grid.is_empty() {
-                    return Err("history-needs-atomic-grid");
-                }
                 let window = completed_window(config, now).ok_or("history-no-completed-night-or-location")?;
                 if status.baseline.as_ref().is_some_and(|b| b.window == window) {
                     return Ok(None);
@@ -279,7 +383,20 @@ pub(crate) fn worker(
                     baseline: status.baseline.clone(),
                     issue: Some("history-loading".into()),
                 });
-                let baseline = crate::home_assistant::recorded_night(config, stop, window)?;
+                let baseline = match crate::home_assistant::recorded_night(config, stop, window) {
+                    Ok(baseline) => baseline,
+                    Err(issue) if reported_fallback_eligible(issue) => {
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err("history-cancelled");
+                        }
+                        lock(runtime).set_baseline_history(HistoryStatus {
+                            baseline: status.baseline.clone(),
+                            issue: Some(format!("reported-night-loading-after-{issue}")),
+                        });
+                        crate::home_assistant::recorded_reported_night(config, stop, window)?
+                    }
+                    Err(issue) => return Err(issue),
+                };
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err("history-cancelled");
                 }
@@ -303,6 +420,19 @@ pub(crate) fn worker(
     }
 }
 
+fn reported_fallback_eligible(issue: &str) -> bool {
+    matches!(
+        issue,
+        "history-missing-acquisition"
+            | "history-invalid-acquisition"
+            | "history-invalid-atomic-sample"
+            | "history-insufficient-minute-samples"
+            | "history-incomplete-night"
+            | "history-gap-or-replay"
+            | "history-recorder-time-mismatch"
+    )
+}
+
 pub(crate) fn validate_night_sample(config: &SolarConfig, at: i64) -> bool {
     sun_state(&config.location, at).state == Sun::Down
 }
@@ -310,6 +440,86 @@ pub(crate) fn validate_night_sample(config: &SolarConfig, at: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reported_row(at: f64, value: &str) -> Value {
+        json!({"lu":at/1000.0,"s":value,"a":{
+            "unit_of_measurement":"kW","device_class":"power","state_class":"measurement"
+        }})
+    }
+
+    #[test]
+    fn reported_power_uses_held_minute_starts_not_event_median_or_hourly_means() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        let mut from = start;
+        while from < window.end {
+            let end = (from + 15 * MINUTE).min(window.end);
+            let rows = if from == start {
+                json!([reported_row(from as f64, "0.300")])
+            } else if from == start + 15 * MINUTE {
+                json!([reported_row(from as f64, "0.300"), reported_row((start + 20 * MINUTE) as f64 - 0.25, "0.320")])
+            } else {
+                json!([reported_row(from as f64, "0.320")])
+            };
+            samples.append(&json!({"sensor.grid":rows}), from, end).unwrap();
+            from = end;
+        }
+        let baseline = samples.finish(window.end + 1).unwrap();
+        assert_eq!(baseline.samples, 40);
+        assert_eq!(baseline.watts, 310.0);
+        assert_eq!(baseline.provenance, REPORTED_PROVENANCE);
+    }
+
+    #[test]
+    fn reported_power_rejects_outages_missing_coverage_and_nonpower_inputs() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        for fault in ["unknown", "unavailable", "negative", "unit", "missing", "order"] {
+            let mut rows = json!([reported_row(start as f64, "0.300")]);
+            match fault {
+                "unknown" | "unavailable" => {
+                    rows.as_array_mut().unwrap().push(reported_row((start + MINUTE) as f64, fault))
+                }
+                "negative" => rows[0]["s"] = json!("-0.1"),
+                "unit" => rows[0]["a"]["unit_of_measurement"] = json!("kWh"),
+                "missing" => rows[0]["lu"] = json!((start + MINUTE) as f64 / 1000.0),
+                _ => rows.as_array_mut().unwrap().push(reported_row(start as f64, "0.300")),
+            }
+            let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+            assert!(samples.append(&json!({"sensor.grid":rows}), start, start + 15 * MINUTE).is_err(), "{fault}");
+        }
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        samples
+            .append(&json!({"sensor.grid":[reported_row(start as f64,"0.300")]}), start, start + 15 * MINUTE)
+            .unwrap();
+        assert_eq!(samples.finish(window.end + 1), Err("reported-night-incomplete-coverage"));
+        assert!(!reported_fallback_eligible("history-auth-rejected"));
+        assert!(!reported_fallback_eligible("history-response-timeout"));
+        assert!(reported_fallback_eligible("history-missing-acquisition"));
+    }
+
+    #[test]
+    fn reported_night_counts_elapsed_utc_minutes_across_both_brussels_dst_transitions() {
+        let config = SolarConfig::from_json(&json!({
+            "location":{"latitude":50.85,"longitude":4.35}
+        }))
+        .unwrap();
+        for date in ["2026-03-29T12:00:00Z", "2026-10-25T12:00:00Z"] {
+            let now = chrono::DateTime::parse_from_rfc3339(date).unwrap().timestamp_millis();
+            let window = completed_window(&config, now).unwrap();
+            let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+            let mut start = window.start;
+            while start < window.end {
+                let end = (start + 15 * MINUTE).min(window.end);
+                samples.append(&json!({"sensor.grid":[reported_row(start as f64,"0.250")]}), start, end).unwrap();
+                start = end;
+            }
+            let baseline = samples.finish(now).unwrap();
+            assert_eq!(baseline.samples as i64, (window.end - window.start) / MINUTE);
+            assert_eq!(baseline.watts, 250.0);
+        }
+    }
 
     fn samples(step: i64, gap: bool) -> NightSamples {
         let start = 1_800_000_000_000;

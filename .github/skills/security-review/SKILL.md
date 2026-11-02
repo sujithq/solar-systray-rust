@@ -16,6 +16,17 @@ description: Security checks for JSON configuration, DSMR telegrams, Sungrow Mod
 
 ## Before merging a change to these paths
 
+- Reported night-baseline alternative: only configured gridImport raw power
+  kW/power/measurement history is eligible after atomic acquisition/coverage
+  failure, not auth/transport failures. Use held start-state, fractional event
+  ordering, full completed solar-night coverage and >=30 UTC-minute-start
+  values; reject explicit unknown/unavailable intervals and malformed inputs,
+  never interpolate outages or substitute statistics/means. Label held-state
+  median as a reported estimate, not physical acquisition. Cache identity must
+  bind both entities/location/schedule/statistic and validated provenance;
+  prior valid results survive failed refresh. Bounds and live isolation match
+  the atomic night path. Test constant held values, gaps, boundaries and cache.
+
 - Keep DSMR frame size and age limits, checksum policy, and field/range validation intact; cover changes with malformed-input tests.
 - Keep Modbus response length, transaction, unit, function, register-count, and power-range checks before decoding measurements.
 - Keep configuration host, port, appliance, coordinate, and numeric validation in `SolarConfig::from_json`; add tests for any changed accepted input.

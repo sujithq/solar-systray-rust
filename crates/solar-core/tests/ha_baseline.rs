@@ -161,3 +161,39 @@ fn empty_history_is_not_a_zero_baseline() {
     let empty = solar_core::ha_baseline::NightSamples::new(NightWindow { start: at - 3_600_000, end: at });
     assert_eq!(empty.finish(at), Err("history-insufficient-minute-samples"));
 }
+
+#[test]
+fn reported_night_cache_and_ui_preserve_estimate_provenance_and_source_identity() {
+    let c = config();
+    let now = time("2026-11-02T12:00:00Z");
+    let window = completed_window(&c, now).unwrap();
+    let directory = std::env::temp_dir().join(format!("solar-reported-night-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("baseline.json");
+    let baseline = RecordedBaseline {
+        window,
+        calculated_at: now,
+        watts: 321.0,
+        samples: ((window.end - window.start) / 60_000) as usize,
+        unit: "W".into(),
+        provenance: solar_core::ha_baseline::REPORTED_PROVENANCE.into(),
+    };
+    save_cache(&path, &c, &baseline).unwrap();
+    assert_eq!(load_cache(&path, &c, now).unwrap(), Some(baseline.clone()));
+    let mut changed = c.clone();
+    changed.home_assistant.grid_import = "sensor.other_power".into();
+    assert_eq!(load_cache(&path, &changed, now), Err("history-cache-source-mismatch"));
+    let mut runtime = solar_core::Runtime::new(c);
+    let mut snapshot = runtime.snapshot(now);
+    snapshot.night_baseline_history =
+        Some(solar_core::ha_baseline::HistoryStatus { baseline: Some(baseline), issue: None });
+    snapshot.night_baseline_w = Some(321.0);
+    let info = solar_core::present::solar_info(&snapshot);
+    let rows = info.section("Power now").unwrap();
+    assert!(rows.value("Night baseline").unwrap().contains("reported-history estimate"));
+    assert!(rows.value("Baseline samples").unwrap().contains("100% recorded availability"));
+    assert!(snapshot.reading_at.is_none());
+    assert!(!snapshot.evaluation.safe_to_start);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}

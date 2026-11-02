@@ -756,6 +756,44 @@ fn recorded_night_with_token(
     samples.finish(crate::now_ms())
 }
 
+pub(crate) fn recorded_reported_night(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    window: crate::ha_baseline::NightWindow,
+) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
+    let token = std::env::var(&config.home_assistant.token_env).map_err(|_| "history-token-missing")?;
+    if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
+        return Err("history-token-invalid");
+    }
+    recorded_reported_night_with_token(config, stop, window, &token)
+}
+
+fn recorded_reported_night_with_token(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    window: crate::ha_baseline::NightWindow,
+    token: &str,
+) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
+    let entity = config.home_assistant.grid_import.clone();
+    let mut samples = crate::ha_baseline::ReportedNightSamples::new(window, entity.clone())?;
+    query_entity_history(
+        config,
+        stop,
+        token,
+        HistoryQuery {
+            start: window.start,
+            end: window.end,
+            budget: 32 * MAX_MESSAGE,
+            chunk_minutes: 15,
+            entities: vec![entity],
+            include_start: true,
+        },
+        |result, start, end| samples.append(result, start, end),
+        |_, _| {},
+    )?;
+    samples.finish(crate::now_ms())
+}
+
 pub(crate) fn recorded_daily(
     config: &crate::SolarConfig,
     stop: &AtomicBool,
@@ -1047,6 +1085,42 @@ mod recorded_history_tests {
             "import_tariff_2":"available","export_tariff_1":"available","export_tariff_2":"available"
         });
         state
+    }
+
+    #[test]
+    fn reported_night_queries_only_power_with_held_states_and_preserves_static_minutes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = config();
+        config.home_assistant.endpoint = format!("ws://{}/api/websocket", listener.local_addr().unwrap());
+        let start = utc_timestamp("2026-10-25T00:00:00Z").unwrap();
+        let window = NightWindow { start, end: start + 40 * 60_000 };
+        let entity = config.home_assistant.grid_import.clone();
+        let server =
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                socket.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+                let _ = socket.read().unwrap();
+                socket.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).unwrap();
+                for n in 0..3 {
+                    let query: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                    assert_eq!(query["entity_ids"], json!([entity]));
+                    assert_eq!(query["include_start_time_state"], true);
+                    assert_eq!(query["no_attributes"], false);
+                    assert_eq!(query["start_time"], iso(start + n * 15 * 60_000));
+                    socket.send(Message::Text(json!({"id":query["id"],"type":"result","success":true,
+                    "result":{entity.clone():[{"s":"0.321","lu":(start+n*15*60_000)as f64/1000.0,
+                        "a":{"unit_of_measurement":"kW","device_class":"power","state_class":"measurement"}}]}
+                }).to_string().into())).unwrap();
+                }
+            });
+        let baseline =
+            recorded_reported_night_with_token(&config, &AtomicBool::new(false), window, "fixture-token").unwrap();
+        assert_eq!(baseline.watts, 321.0);
+        assert_eq!(baseline.samples, 40);
+        assert_eq!(baseline.provenance, crate::ha_baseline::REPORTED_PROVENANCE);
+        server.join().unwrap();
     }
 
     #[test]

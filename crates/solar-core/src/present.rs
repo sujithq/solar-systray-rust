@@ -269,8 +269,12 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         }
         let text = baseline.map_or_else(|| "Unavailable".to_string(), watts);
         let state = if let Some(history) = &s.night_baseline_history {
-            if history.baseline.is_some() {
-                format!("{text} (recorded night)")
+            if let Some(baseline) = &history.baseline {
+                if baseline.provenance == crate::ha_baseline::REPORTED_PROVENANCE {
+                    format!("{text} (reported-history estimate)")
+                } else {
+                    format!("{text} (recorded night)")
+                }
             } else {
                 format!("{text} default; no valid recorded night")
             }
@@ -309,7 +313,19 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
                     Tone::Muted,
                 ));
                 rows.push(row("Baseline source", &baseline.provenance, Tone::Muted));
-                rows.push(row("Baseline samples", format!("{} actual minute samples", baseline.samples), Tone::Muted));
+                rows.push(row(
+                    "Baseline samples",
+                    format!(
+                        "{} {}",
+                        baseline.samples,
+                        if baseline.provenance == crate::ha_baseline::REPORTED_PROVENANCE {
+                            "held minute-start values; 100% recorded availability, not physical continuity"
+                        } else {
+                            "actual minute samples"
+                        }
+                    ),
+                    Tone::Muted,
+                ));
             }
         }
     }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HA night baseline can use an explicitly labeled recorded grid-import-power
+  estimate when atomic acquisition history is unavailable. It takes the median
+  of held minute-start values across a fully available completed solar night;
+  explicit outages reject coverage, and cache/UI retain distinct provenance.
 - HA reported-energy startup now checks initialized transport every 200 ms
   before atomic baseline recovery, avoiding an initial 30-second/bridge delay.
   Today and a private sanitized status report expose query timing, validated
