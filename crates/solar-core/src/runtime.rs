@@ -100,7 +100,8 @@ impl Runtime {
         Runtime {
             ha_daily: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty()).then(Default::default),
             reported_energy: None,
-            reported_energy_issue: None,
+            reported_energy_issue: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty())
+                .then(|| "reported-energy-waiting-for-transport".into()),
             engine: DecisionEngine::new(config.clone()),
             config,
             meter,
@@ -178,6 +179,10 @@ impl Runtime {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn begin_reported_history(&mut self) {
+        self.reported_energy_issue = Some("reported-energy-loading".into());
     }
 
     pub fn appliance(&self) -> &str {

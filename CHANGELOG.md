@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HA Today now shows pending/loading status for the original tariff-history
+  calculation before a result or error arrives, so the atomic partial fallback
+  no longer silently conceals an in-progress full-day reported-energy query.
 - HA Today now queries the original cumulative day/night tariff recorder
   entities for a separately labeled reported-energy total using HA's held
   midnight start state. Older history no longer unnecessarily depends on the

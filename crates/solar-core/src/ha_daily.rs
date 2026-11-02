@@ -453,6 +453,7 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, path: Option<&
         }
         let now = crate::now_ms();
         if reported_at.is_none_or(|at| now - at >= 60_000) && lock(runtime).reported_history_ready(now) {
+            lock(runtime).begin_reported_history();
             let result = crate::home_assistant::recorded_reported_energy(config, stop, now - 10_000);
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return;

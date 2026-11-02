@@ -391,7 +391,7 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
             row("Refresh age", format!("{age}s{}", if age > 120 { "; stale retained result" } else { "" }), Tone::Warn),
         ];
         if let Some(issue) = &s.reported_energy_issue {
-            rows.push(row("Recorded energy refresh", issue, Tone::Warn));
+            rows.push(row("Recorded energy refresh", reported_energy_text(issue), Tone::Warn));
         }
         return rows;
     }
@@ -419,7 +419,7 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
                     rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
                 }
                 if let Some(issue) = &s.reported_energy_issue {
-                    rows.push(row("HA reported energy", issue, Tone::Warn));
+                    rows.push(row("HA reported energy", reported_energy_text(issue), Tone::Warn));
                 }
             }
             rows.extend([
@@ -446,10 +446,22 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
                 rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
             }
             if let Some(issue) = &s.reported_energy_issue {
-                rows.push(row("HA reported energy", issue, Tone::Warn));
+                rows.push(row("HA reported energy", reported_energy_text(issue), Tone::Warn));
             }
             rows
         }
+    }
+}
+
+fn reported_energy_text(issue: &str) -> &str {
+    match issue {
+        "reported-energy-waiting-for-transport" => {
+            "Pending: waiting for initialized HA transport/history worker; atomic totals are not full-day reported energy"
+        }
+        "reported-energy-loading" => {
+            "Loading original tariff recorder history (up to 180s); atomic fallback remains partial"
+        }
+        _ => issue,
     }
 }
 

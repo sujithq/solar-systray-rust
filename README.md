@@ -378,6 +378,10 @@ the original recorder rather than depending on new atomic history. This does
 not modify the private atomic/night caches, settings, or night-baseline logic.
 If reported history is unavailable, the separately labeled atomic partial/exact
 view below remains available; errors do not change grid/GO/household/forecast.
+While that fallback is displayed, **HA reported energy** also shows pending
+transport/worker initialization, loading (up to the 180-second query deadline),
+or the last query error. Small partial-run totals are not a completed reported
+full-day calculation. A refresh in progress is also labeled on a retained result.
 History existence in an HA graph does not itself verify these four entities'
 coverage or reset convention, and this implementation makes no live access claim.
 
