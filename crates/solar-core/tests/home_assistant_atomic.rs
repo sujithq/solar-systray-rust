@@ -41,6 +41,26 @@ fn sample(session: &str, sequence: u64, at: i64, import_w: f64, export_w: f64) -
             "meter_timestamp":iso(at),"received_at":iso(at),"import_w":import_w,"export_w":export_w}})
 }
 
+fn full_sample(sequence: u64, at: i64) -> Value {
+    let mut value = sample("meter-features", sequence, at, 800.0, 100.0);
+    let attributes = value["attributes"].as_object_mut().unwrap();
+    attributes.extend(
+        json!({
+            "demand_w":2000, "monthly_peak_w":5000,
+            "monthly_peak_at":"2027-01-15T07:00:00Z", "monthly_peak_month":"2027-01",
+            "import_tariff_1_wh":100000,"import_tariff_2_wh":50000,
+            "export_tariff_1_wh":20000,"export_tariff_2_wh":10000,
+            "optional_status":{"demand":"available","monthly_peak":"available",
+                "import_tariff_1":"available","import_tariff_2":"available",
+                "export_tariff_1":"available","export_tariff_2":"available"}
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    value
+}
+
 fn meter_value(id: &str, value: &str, unit: &str, at: i64) -> Value {
     let mut attributes = json!({"unit_of_measurement":unit});
     if matches!(id, IMPORT_1 | IMPORT_2 | EXPORT_1 | EXPORT_2) {
@@ -109,6 +129,9 @@ fn atomic_mapping_is_explicit_configurable_and_never_falls_back_to_paired_entiti
     }
     assert!(state.grid(AT, 30.0).is_none());
     assert!(state.relevant(GRID));
+    for id in [DEMAND, PEAK, IMPORT_1, IMPORT_2, EXPORT_1, EXPORT_2] {
+        assert!(!state.relevant(id), "obsolete optional mappings must not be subscribed");
+    }
     state.state(GRID, &sample("synthetic-session-a", 1, AT, 0.0, 3000.0), AT);
     assert_eq!(state.grid(AT, 30.0).unwrap().grid_export_w, 3000.0, "payload powers are W, not kW");
     state.state(GRID, &json!({"state":"unavailable","attributes":{"schema_version":1}}), AT);
@@ -116,7 +139,7 @@ fn atomic_mapping_is_explicit_configurable_and_never_falls_back_to_paired_entiti
 }
 
 #[test]
-fn live_proximate_meter_entities_feed_existing_peak_and_partial_day_engines() {
+fn atomic_optional_fields_feed_existing_peak_and_partial_day_engines() {
     let config = SolarConfig::from_json(&json!({
         "energySource":{"type":"home-assistant"},
         "homeAssistant":{"atomicGrid":GRID,"meterDataStaleSeconds":10}
@@ -126,7 +149,7 @@ fn live_proximate_meter_entities_feed_existing_peak_and_partial_day_engines() {
     runtime.ha_connected();
     runtime.ha_ready();
     let at = AT + 5 * 60_000;
-    runtime.ha_state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    runtime.ha_state(GRID, &full_sample(1, at - 1000), at);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -139,7 +162,7 @@ fn live_proximate_meter_entities_feed_existing_peak_and_partial_day_engines() {
     }
 
     let next_at = at + 1000;
-    runtime.ha_state(GRID, &sample("meter-features", 2, next_at, 800.0, 100.0), next_at);
+    runtime.ha_state(GRID, &full_sample(2, next_at), next_at);
     let first = runtime.snapshot(next_at);
     assert_eq!(first.evaluation.current_demand_w, Some(2000.0));
     assert_eq!(first.evaluation.monthly_peak_w, Some(5000.0));
@@ -154,26 +177,31 @@ fn live_proximate_meter_entities_feed_existing_peak_and_partial_day_engines() {
     assert!(tooltip(&first).contains("Partial today in "));
 
     let counter_at = at + 2000;
-    runtime.ha_state(IMPORT_1, &meter_value(IMPORT_1, "100.001", "kWh", counter_at), counter_at);
+    let mut counters = full_sample(3, counter_at);
+    counters["attributes"]["import_tariff_1_wh"] = json!(100001);
+    runtime.ha_state(GRID, &counters, counter_at);
     let partial = runtime.snapshot(counter_at);
     assert_eq!(partial.daily_energy.import_wh, Some(1));
     assert_eq!(partial.daily_energy.export_wh, Some(0));
     assert_eq!(partial.daily_energy.since_minute, Some(9 * 60 + 4));
 
     let stale_at = at + 11_000;
-    runtime.ha_state(GRID, &sample("meter-features", 3, stale_at, 800.0, 100.0), stale_at);
+    runtime.ha_state(GRID, &sample("meter-features", 4, stale_at, 800.0, 100.0), stale_at);
     let stale = runtime.snapshot(stale_at);
     assert!(stale.evaluation.state != State::Offline, "optional meter-data expiry cannot invalidate grid");
     assert!(!stale.peak_forecast.available);
     assert!(!stale.daily_energy.available);
-    assert_eq!(stale.home_assistant.as_ref().unwrap().daily_energy_issue.as_deref(), Some("ha-meter-data-stale"));
+    assert_eq!(
+        stale.home_assistant.as_ref().unwrap().daily_energy_issue.as_deref(),
+        Some("ha-atomic-optional-not-published")
+    );
 }
 
 #[test]
 fn counter_decrease_invalidates_partial_totals_without_affecting_atomic_grid() {
     let mut runtime = runtime();
     let at = AT + 5 * 60_000;
-    runtime.ha_state(GRID, &sample("meter-features", 1, at, 800.0, 100.0), at);
+    runtime.ha_state(GRID, &full_sample(1, at), at);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -187,7 +215,9 @@ fn counter_decrease_invalidates_partial_totals_without_affecting_atomic_grid() {
     assert!(runtime.snapshot(at).daily_energy.available);
 
     let next_at = at + 1000;
-    runtime.ha_state(GRID, &sample("meter-features", 2, next_at, 800.0, 100.0), next_at);
+    let mut decreased = full_sample(2, next_at);
+    decreased["attributes"]["import_tariff_1_wh"] = json!(99999);
+    runtime.ha_state(GRID, &decreased, next_at);
     runtime.ha_state(IMPORT_1, &meter_value(IMPORT_1, "99.999", "kWh", next_at), next_at);
     let snapshot = runtime.snapshot(next_at);
     assert!(!snapshot.daily_energy.available);
@@ -196,7 +226,7 @@ fn counter_decrease_invalidates_partial_totals_without_affecting_atomic_grid() {
 }
 
 #[test]
-fn unchanged_optional_values_explain_missing_acquisition_evidence_in_the_tray() {
+fn separate_optional_values_cannot_fill_a_grid_only_atomic_publisher() {
     let mut runtime = runtime();
     let at = AT + 5 * 60_000;
     for (id, value, unit) in [
@@ -212,16 +242,13 @@ fn unchanged_optional_values_explain_missing_acquisition_evidence_in_the_tray() 
 
     runtime.ha_state(GRID, &sample("meter-features", 1, at, 0.0, 0.0), at);
     let first = runtime.snapshot(at);
-    assert_eq!(first.daily_energy.reason, "ha-meter-data-no-acquisition-evidence");
-    assert_eq!(first.peak_forecast.reason, "ha-meter-data-no-acquisition-evidence");
+    assert_eq!(first.daily_energy.reason, "ha-atomic-optional-not-published");
+    assert_eq!(first.peak_forecast.reason, "ha-atomic-optional-not-published");
     let info = solar_info(&first);
-    assert_eq!(
-        info.section("Today").unwrap().value("Why"),
-        Some("unchanged counters have no acquisition evidence; atomic samples are required")
-    );
+    assert_eq!(info.section("Today").unwrap().value("Why"), Some("atomic publisher has no optional-field contract"));
     assert_eq!(
         info.section("Quarter-hour peak").unwrap().value("Forecast"),
-        Some("unchanged HA value; no acquisition evidence")
+        Some("atomic publisher has no optional-field contract")
     );
 
     let next_at = at + 1000;
@@ -237,17 +264,17 @@ fn unchanged_optional_values_explain_missing_acquisition_evidence_in_the_tray() 
         runtime.ha_state(id, &meter_value(id, value, unit, at), next_at);
     }
     let next = runtime.snapshot(next_at);
-    assert_eq!(next.daily_energy.reason, "ha-meter-data-no-acquisition-evidence");
-    assert_eq!(next.peak_forecast.reason, "ha-meter-data-no-acquisition-evidence");
+    assert_eq!(next.daily_energy.reason, "ha-atomic-optional-not-published");
+    assert_eq!(next.peak_forecast.reason, "ha-atomic-optional-not-published");
     assert_ne!(next.evaluation.state, State::Offline, "the optional-data gate cannot invalidate the grid");
 }
 
 #[test]
-fn optional_entities_crossing_brussels_day_or_month_boundary_fail_closed() {
+fn atomic_peak_occurrence_month_is_not_assumed_from_telegram_month() {
     let mut state = online();
     let grid_time = chrono::DateTime::parse_from_rfc3339("2027-01-31T22:59:50Z").unwrap().timestamp_millis();
     let next_day = grid_time + 15_000;
-    state.state(GRID, &sample("meter-features", 1, grid_time, 800.0, 100.0), grid_time);
+    state.state(GRID, &full_sample(1, grid_time), grid_time);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -261,8 +288,8 @@ fn optional_entities_crossing_brussels_day_or_month_boundary_fail_closed() {
     assert!(state.peak_data_issue(grid_time).is_none());
     assert!(state.daily_data_issue(grid_time).is_none());
 
-    state.state(PEAK, &meter_value(PEAK, "5.1", "kW", next_day), next_day);
-    assert_eq!(state.peak_data_issue(next_day), Some("ha-meter-data-month-boundary"));
+    state.state(GRID, &full_sample(2, next_day), next_day);
+    assert_eq!(state.peak_data_issue(next_day), Some("ha-atomic-optional-previous-month"));
     for (id, value, unit) in [
         (IMPORT_1, "100.001", "kWh"),
         (IMPORT_2, "50.001", "kWh"),
@@ -271,15 +298,19 @@ fn optional_entities_crossing_brussels_day_or_month_boundary_fail_closed() {
     ] {
         state.state(id, &meter_value(id, value, unit, next_day), next_day);
     }
-    assert_eq!(state.daily_data_issue(next_day), Some("ha-meter-data-day-boundary"));
+    assert!(state.daily_data_issue(next_day).is_none());
+    let mut reading = state.grid(next_day, 30.0).unwrap();
+    state.enrich_reading(&mut reading, next_day);
+    assert!(reading.monthly_peak_w.is_none(), "old peak must not become the current-month peak");
+    assert!(reading.energy_totals_wh.is_some(), "same-telegram counters are valid across a local day boundary");
     assert!(state.grid(next_day, 30.0).is_some(), "optional boundary mismatch cannot invalidate grid");
 }
 
 #[test]
-fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after_reconnect() {
+fn atomic_optional_snapshots_cannot_restore_features_until_a_new_live_sequence() {
     let mut state = online();
     let at = AT + 5 * 60_000;
-    state.state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    state.state(GRID, &full_sample(1, at - 1000), at);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -297,7 +328,7 @@ fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after
     state.connected();
     state.ready();
     let reconnect_at = at + 1000;
-    state.snapshot_state(GRID, &sample("meter-features", 2, reconnect_at, 800.0, 100.0), reconnect_at);
+    state.snapshot_state(GRID, &full_sample(2, reconnect_at), reconnect_at);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -309,9 +340,11 @@ fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after
         state.snapshot_state(id, &meter_value(id, value, unit, at), reconnect_at);
     }
     assert!(state.grid(reconnect_at, 30.0).is_none());
+    assert_eq!(state.daily_data_issue(reconnect_at), Some("ha-meter-data-grid-unavailable"));
+    assert_eq!(state.peak_data_issue(reconnect_at), Some("ha-meter-data-grid-unavailable"));
 
     let live_at = reconnect_at + 1000;
-    state.state(GRID, &sample("meter-features", 3, live_at, 800.0, 100.0), live_at);
+    state.state(GRID, &full_sample(3, live_at), live_at);
     for (id, value, unit) in [
         (DEMAND, "2.0", "kW"),
         (PEAK, "5.0", "kW"),
@@ -322,8 +355,8 @@ fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after
     ] {
         state.state(id, &meter_value(id, value, unit, at), live_at);
     }
-    assert_eq!(state.peak_data_issue(live_at), Some("ha-meter-data-no-acquisition-evidence"));
-    assert_eq!(state.daily_data_issue(live_at), Some("ha-meter-data-no-acquisition-evidence"));
+    assert!(state.peak_data_issue(live_at).is_none());
+    assert!(state.daily_data_issue(live_at).is_none());
 
     for (id, value, unit) in [
         (DEMAND, "2.1", "kW"),
@@ -340,10 +373,10 @@ fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after
 }
 
 #[test]
-fn optional_meter_states_require_live_proximity_valid_units_and_counter_metadata() {
+fn atomic_optional_fields_ignore_separate_entity_metadata_and_old_age_limits() {
     let mut state = online();
     let at = AT + 5 * 60_000;
-    state.state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    state.state(GRID, &full_sample(1, at - 1000), at);
     state.state(DEMAND, &meter_value(DEMAND, "2.0", "kW", at), at);
     state.state(PEAK, &meter_value(PEAK, "5.0", "kW", at), at);
     for (id, value) in [(IMPORT_1, "100.000"), (IMPORT_2, "50.000"), (EXPORT_1, "20.000"), (EXPORT_2, "10.000")] {
@@ -361,12 +394,12 @@ fn optional_meter_states_require_live_proximity_valid_units_and_counter_metadata
     assert!(state.peak_data_issue(at).is_none());
 
     let too_far = at + 31_000;
-    state.state(GRID, &sample("meter-features", 2, too_far, 800.0, 100.0), too_far);
+    state.state(GRID, &full_sample(2, too_far), too_far);
     let mut reading = state.grid(too_far, 30.0).unwrap();
     state.enrich_reading(&mut reading, too_far);
-    assert!(reading.current_demand_w.is_none());
-    assert!(reading.energy_totals_wh.is_none());
-    assert_eq!(state.daily_data_issue(too_far), Some("ha-meter-data-event-proximity"));
+    assert_eq!(reading.current_demand_w, Some(2000.0));
+    assert!(reading.energy_totals_wh.is_some());
+    assert!(state.daily_data_issue(too_far).is_none());
 
     let bad_config = SolarConfig::from_json(&json!({
         "energySource":{"type":"home-assistant"},
@@ -377,9 +410,189 @@ fn optional_meter_states_require_live_proximity_valid_units_and_counter_metadata
     let mut invalid_class = invalid_class;
     invalid_class["attributes"]["state_class"] = json!("measurement");
     state.snapshot_state(IMPORT_1, &invalid_class, too_far);
-    state.state(GRID, &sample("meter-features", 3, too_far + 1000, 800.0, 100.0), too_far + 1000);
-    assert_eq!(state.daily_data_issue(too_far + 1000), Some("ha-meter-data-invalid"));
+    state.state(GRID, &full_sample(3, too_far + 1000), too_far + 1000);
+    assert!(state.daily_data_issue(too_far + 1000).is_none());
     assert!(state.grid(too_far + 1000, 30.0).is_some());
+}
+
+#[test]
+fn unchanged_atomic_optionals_remain_acquired_but_expire_with_the_grid() {
+    let mut runtime = runtime();
+    for sequence in 1..=41 {
+        let at = AT + 5 * 60_000 + (sequence as i64 - 1) * 10_000;
+        let mut sample = full_sample(sequence, at);
+        sample["attributes"]["demand_w"] = json!(0);
+        sample["attributes"]["import_w"] = json!(0);
+        sample["attributes"]["export_w"] = json!(3000);
+        runtime.ha_state(GRID, &sample, at);
+        let snapshot = runtime.snapshot(at);
+        assert!(snapshot.daily_energy.available);
+        assert_eq!(snapshot.daily_energy.import_wh, Some(0));
+        assert_eq!(snapshot.daily_energy.export_wh, Some(0));
+        assert_eq!(snapshot.evaluation.current_demand_w, Some(0.0));
+        assert!(snapshot.home_assistant.as_ref().unwrap().peak_forecast_issue.is_none());
+    }
+    let at = AT + 5 * 60_000 + 400_000;
+    assert!(runtime.snapshot(at).evaluation.safe_to_start);
+    let stale = runtime.snapshot(at + 30_000);
+    assert!(!stale.peak_forecast.available);
+    assert!(!stale.daily_energy.available);
+    assert!(!stale.evaluation.safe_to_start);
+}
+
+#[test]
+fn malformed_atomic_optionals_are_isolated_and_never_carried_forward() {
+    for (field, invalid) in [
+        ("demand_w", json!(-1)),
+        ("demand_w", json!(1_000_001)),
+        ("demand_w", json!(0.5)),
+        ("demand_w", json!("NaN")),
+        ("demand_w", Value::Null),
+        ("monthly_peak_w", json!(-1)),
+        ("monthly_peak_w", json!(1_000_001)),
+        ("monthly_peak_w", json!(1.5)),
+        ("monthly_peak_at", json!("2027-01-16T00:00:00Z")),
+        ("monthly_peak_at", json!("2027-01-15T07:00:00+01:00")),
+        ("monthly_peak_month", json!("2027-02")),
+        ("monthly_peak_month", json!("2027-1")),
+        ("monthly_peak_at", Value::Null),
+        ("import_tariff_1_wh", json!(-1)),
+        ("import_tariff_2_wh", json!(1_000_000_000)),
+        ("export_tariff_1_wh", json!(1.5)),
+        ("export_tariff_2_wh", json!("10000")),
+    ] {
+        let mut state = online();
+        state.state(GRID, &full_sample(1, AT), AT);
+        let mut bad = full_sample(2, AT + 1000);
+        bad["attributes"][field] = invalid;
+        state.state(GRID, &bad, AT + 1000);
+        let mut reading = state.grid(AT + 1000, 30.0).expect(field);
+        state.enrich_reading(&mut reading, AT + 1000);
+        let counter = field.contains("tariff");
+        assert_eq!(state.daily_data_issue(AT + 1000).is_some(), counter, "{field}");
+        assert_eq!(state.peak_data_issue(AT + 1000).is_some(), !counter, "{field}");
+        assert_eq!(reading.energy_totals_wh.is_none(), counter, "{field}");
+        assert_eq!(reading.current_demand_w.is_none(), field == "demand_w", "{field}");
+        assert_eq!(reading.monthly_peak_w.is_none(), field.starts_with("monthly_peak"), "{field}");
+    }
+}
+
+#[test]
+fn optional_status_null_contract_and_grid_only_compatibility_are_explicit() {
+    for (group, fields) in [
+        ("demand", vec!["demand_w"]),
+        ("monthly_peak", vec!["monthly_peak_w", "monthly_peak_at", "monthly_peak_month"]),
+        ("import_tariff_1", vec!["import_tariff_1_wh"]),
+        ("import_tariff_2", vec!["import_tariff_2_wh"]),
+        ("export_tariff_1", vec!["export_tariff_1_wh"]),
+        ("export_tariff_2", vec!["export_tariff_2_wh"]),
+    ] {
+        for status in ["missing", "invalid", "unexpected"] {
+            let mut state = online();
+            let mut value = full_sample(1, AT);
+            value["attributes"]["optional_status"][group] = json!(status);
+            for field in &fields {
+                value["attributes"][*field] = Value::Null;
+            }
+            state.state(GRID, &value, AT);
+            assert!(state.grid(AT, 30.0).is_some());
+            let issue = if group.contains("tariff") { state.daily_data_issue(AT) } else { state.peak_data_issue(AT) };
+            assert_eq!(
+                issue,
+                Some(if status == "missing" { "ha-atomic-optional-missing" } else { "ha-atomic-optional-invalid" })
+            );
+
+            // A missing/invalid declaration cannot conceal a non-null field.
+            value["attributes"][fields[0]] = json!(0);
+            value["state"] = json!("2");
+            value["attributes"]["sample_sequence"] = json!(2);
+            value["attributes"]["meter_timestamp"] = json!(iso(AT + 1000));
+            value["attributes"]["received_at"] = json!(iso(AT + 1000));
+            state.state(GRID, &value, AT + 1000);
+            let issue = if group.contains("tariff") {
+                state.daily_data_issue(AT + 1000)
+            } else {
+                state.peak_data_issue(AT + 1000)
+            };
+            assert_eq!(issue, Some("ha-atomic-optional-invalid"));
+        }
+    }
+    let mut state = online();
+    state.state(GRID, &full_sample(1, AT), AT);
+    state.state(GRID, &sample("meter-features", 2, AT + 1000, 0.0, 0.0), AT + 1000);
+    assert_eq!(state.daily_data_issue(AT + 1000), Some("ha-atomic-optional-not-published"));
+    assert_eq!(state.peak_data_issue(AT + 1000), Some("ha-atomic-optional-not-published"));
+}
+
+#[test]
+fn malformed_status_objects_and_omitted_fields_do_not_reject_grid() {
+    for status in [json!({}), json!([]), json!("available"), json!(true)] {
+        let mut state = online();
+        let mut value = full_sample(1, AT);
+        value["attributes"]["optional_status"] = status;
+        state.state(GRID, &value, AT);
+        assert!(state.grid(AT, 30.0).is_some());
+        assert_eq!(state.peak_data_issue(AT), Some("ha-atomic-optional-invalid"));
+        assert_eq!(state.daily_data_issue(AT), Some("ha-atomic-optional-invalid"));
+    }
+    let mut state = online();
+    let mut value = full_sample(1, AT);
+    value["attributes"]["optional_status"]["demand"] = json!("missing");
+    value["attributes"].as_object_mut().unwrap().remove("demand_w");
+    state.state(GRID, &value, AT);
+    assert!(state.grid(AT, 30.0).is_some());
+    assert_eq!(state.peak_data_issue(AT), Some("ha-atomic-optional-invalid"));
+    assert!(state.daily_data_issue(AT).is_none());
+}
+
+#[test]
+fn partial_counters_restart_on_brussels_day_and_reconnect_not_across_resets() {
+    let mut runtime = runtime();
+    let at = chrono::DateTime::parse_from_rfc3339("2027-01-15T22:59:50Z").unwrap().timestamp_millis();
+    runtime.ha_state(GRID, &full_sample(1, at), at);
+    let next_day = at + 15_000;
+    let mut value = full_sample(2, next_day);
+    value["attributes"]["import_tariff_1_wh"] = json!(101000);
+    runtime.ha_state(GRID, &value, next_day);
+    let snapshot = runtime.snapshot(next_day);
+    assert_eq!(snapshot.daily_energy.import_wh, Some(0), "new day starts a partial baseline, not a midnight estimate");
+    assert_eq!(snapshot.daily_energy.since_minute, Some(0));
+    value = full_sample(3, next_day + 1000);
+    value["attributes"]["import_tariff_1_wh"] = json!(101010);
+    runtime.ha_state(GRID, &value, next_day + 1000);
+    assert_eq!(runtime.snapshot(next_day + 1000).daily_energy.import_wh, Some(10));
+    runtime.ha_disconnect("ha-read-or-protocol");
+    runtime.ha_connected();
+    runtime.ha_ready();
+    value = full_sample(4, next_day + 2000);
+    value["attributes"]["import_tariff_1_wh"] = json!(101100);
+    runtime.ha_snapshot_state(GRID, &value, next_day + 2000);
+    assert!(!runtime.snapshot(next_day + 2000).daily_energy.available);
+    value = full_sample(5, next_day + 3000);
+    value["attributes"]["import_tariff_1_wh"] = json!(101200);
+    runtime.ha_state(GRID, &value, next_day + 3000);
+    assert_eq!(runtime.snapshot(next_day + 3000).daily_energy.import_wh, Some(0));
+}
+
+#[test]
+fn peak_month_uses_brussels_occurrence_time_in_summer_not_utc_month() {
+    let at = chrono::DateTime::parse_from_rfc3339("2027-03-31T22:00:10Z").unwrap().timestamp_millis();
+    let mut state = online();
+    let mut value = full_sample(1, at);
+    value["attributes"]["monthly_peak_at"] = json!("2027-03-31T22:00:00Z");
+    value["attributes"]["monthly_peak_month"] = json!("2027-04");
+    state.state(GRID, &value, at);
+    assert!(state.peak_data_issue(at).is_none());
+    let mut reading = state.grid(at, 30.0).unwrap();
+    state.enrich_reading(&mut reading, at);
+    assert_eq!(reading.monthly_peak_month, Some(202704));
+    assert_eq!(reading.meter_offset_minutes, Some(120));
+
+    // Replayed sequence cannot change optional values or supply fresh evidence.
+    value["attributes"]["demand_w"] = json!(10000);
+    state.state(GRID, &value, at + 1000);
+    assert!(state.grid(at + 1000, 30.0).is_none());
+    assert_eq!(state.peak_data_issue(at + 1000), Some("ha-meter-data-grid-unavailable"));
 }
 
 #[test]

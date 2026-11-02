@@ -78,6 +78,10 @@ pub fn forecast_reason_text(reason: &str) -> &'static str {
         "ha-meter-data-not-mapped" => "meter entity not mapped",
         "ha-meter-data-invalid" => "invalid meter entity",
         "ha-meter-data-no-acquisition-evidence" => "unchanged HA value; no acquisition evidence",
+        "ha-atomic-optional-not-published" => "atomic publisher has no optional-field contract",
+        "ha-atomic-optional-missing" => "required field missing from this telegram",
+        "ha-atomic-optional-invalid" => "invalid atomic optional field/status",
+        "ha-atomic-optional-previous-month" => "atomic peak belongs to a previous month",
         "ha-meter-data-unavailable" => "meter entity unavailable",
         "ha-meter-data-stale" => "meter entity state-change is stale",
         "ha-meter-data-event-proximity" => "outside HA event-proximity window",
@@ -104,6 +108,9 @@ pub fn daily_reason_text(reason: &str) -> Option<&'static str> {
         "ha-meter-data-no-acquisition-evidence" => {
             "unchanged counters have no acquisition evidence; atomic samples are required"
         }
+        "ha-atomic-optional-not-published" => "atomic publisher has no optional-field contract",
+        "ha-atomic-optional-missing" => "one or more counters are missing from this telegram",
+        "ha-atomic-optional-invalid" => "invalid atomic counter/status",
         "ha-meter-data-unavailable" => "an energy counter is unavailable",
         "ha-meter-data-stale" => "an energy counter state-change is stale",
         "ha-meter-data-event-proximity" => "counter events are outside the HA event-proximity window",
@@ -425,7 +432,7 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
         ));
         rows.push(row(
             "Optional meter evidence",
-            "Live HA value-change events within bounded age/proximity; not same-telegram proof",
+            "Same accepted atomic telegram; missing/invalid fields never carried forward",
             Tone::Warn,
         ));
         if let Some(issue) = &s.diagnostics.last_issue {

@@ -521,7 +521,7 @@ fn runtime_gates_partial_features_and_observes_transient_imports_between_ui_tick
     assert!(snapshot.evaluation.current_demand_w.is_none());
     assert!(snapshot.evaluation.monthly_peak_w.is_none());
     let info = solar_info(&snapshot);
-    assert!(info.section("Quarter-hour peak").unwrap().value("Forecast").unwrap().contains("no meter clock"));
+    assert!(info.section("Quarter-hour peak").unwrap().value("Forecast").unwrap().contains("atomic meter"));
     assert!(info.section("Today").unwrap().value("Why").unwrap().contains("atomic meter sample is required"));
     runtime.ha_state(IMPORT, &entity(IMPORT, "0.001", "kW", AT + 2000), AT + 2000);
     runtime.ha_state(IMPORT, &entity(IMPORT, "0", "kW", AT + 3000), AT + 3000);

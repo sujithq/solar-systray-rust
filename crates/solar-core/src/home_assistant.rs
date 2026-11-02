@@ -15,13 +15,7 @@ const GRID_IMPORT: usize = 0;
 const GRID_EXPORT: usize = 1;
 const INVERTER_AC: usize = 2;
 const INVERTER_DC: usize = 3;
-const CURRENT_DEMAND: usize = 4;
-const MONTHLY_PEAK: usize = 5;
-const ENERGY_IMPORT_TARIFF_1: usize = 6;
-const ENERGY_IMPORT_TARIFF_2: usize = 7;
-const ENERGY_EXPORT_TARIFF_1: usize = 8;
-const ENERGY_EXPORT_TARIFF_2: usize = 9;
-const SAMPLE_COUNT: usize = 10;
+const SAMPLE_COUNT: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HaConfig {
@@ -204,38 +198,16 @@ impl HaConfig {
     }
 
     fn entity_index(&self, id: &str) -> Option<usize> {
-        [
-            &self.grid_import,
-            &self.grid_export,
-            &self.active_power,
-            &self.dc_power,
-            &self.current_demand,
-            &self.monthly_peak,
-            &self.energy_import_tariff1,
-            &self.energy_import_tariff2,
-            &self.energy_export_tariff1,
-            &self.energy_export_tariff2,
-        ]
-        .iter()
-        .position(|entity| !entity.is_empty() && entity.as_str() == id)
+        [&self.grid_import, &self.grid_export, &self.active_power, &self.dc_power]
+            .iter()
+            .position(|entity| !entity.is_empty() && entity.as_str() == id)
     }
 
     fn entity_name(&self, index: usize) -> Option<&str> {
-        [
-            self.grid_import.as_str(),
-            self.grid_export.as_str(),
-            self.active_power.as_str(),
-            self.dc_power.as_str(),
-            self.current_demand.as_str(),
-            self.monthly_peak.as_str(),
-            self.energy_import_tariff1.as_str(),
-            self.energy_import_tariff2.as_str(),
-            self.energy_export_tariff1.as_str(),
-            self.energy_export_tariff2.as_str(),
-        ]
-        .get(index)
-        .copied()
-        .filter(|entity| !entity.is_empty())
+        [self.grid_import.as_str(), self.grid_export.as_str(), self.active_power.as_str(), self.dc_power.as_str()]
+            .get(index)
+            .copied()
+            .filter(|entity| !entity.is_empty())
     }
 
     fn relevant(&self, id: &str) -> bool {
@@ -243,7 +215,7 @@ impl HaConfig {
             id == self.grid_import || id == self.grid_export
         } else {
             id == self.atomic_grid
-        }) || self.entity_index(id).is_some_and(|index| index >= INVERTER_AC)
+        }) || self.entity_index(id).is_some_and(|index| matches!(index, INVERTER_AC | INVERTER_DC))
     }
 }
 
@@ -271,6 +243,74 @@ struct AtomicPayload {
     publisher_at: i64,
     import_w: f64,
     export_w: f64,
+    optional: AtomicOptional,
+}
+
+#[derive(Clone, PartialEq)]
+struct AtomicOptional {
+    demand: Result<f64, &'static str>,
+    peak: Result<(f64, i64), &'static str>,
+    counters: Result<EnergyTotals, &'static str>,
+}
+
+fn atomic_optional(attributes: &Value, meter_at: i64) -> AtomicOptional {
+    let status = &attributes["optional_status"];
+    let group = |name: &str, fields: &[&str]| -> Result<(), &'static str> {
+        if status.is_null() {
+            return Err("ha-atomic-optional-not-published");
+        }
+        match status[name].as_str() {
+            Some("available") if fields.iter().all(|field| !attributes[*field].is_null()) => Ok(()),
+            Some("missing" | "invalid")
+                if fields.iter().all(|field| attributes.get(*field).is_some_and(Value::is_null)) =>
+            {
+                Err(if status[name] == "missing" { "ha-atomic-optional-missing" } else { "ha-atomic-optional-invalid" })
+            }
+            _ => Err("ha-atomic-optional-invalid"),
+        }
+    };
+    // Schema-v1 suffixes define W and Wh, never HA display-unit metadata.
+    let power = |field: &str| {
+        attributes[field]
+            .as_i64()
+            .filter(|value| (0..=1_000_000).contains(value))
+            .map(|value| value as f64)
+            .ok_or("ha-atomic-optional-invalid")
+    };
+    let demand = group("demand", &["demand_w"]).and_then(|_| power("demand_w"));
+    let peak = (|| {
+        group("monthly_peak", &["monthly_peak_w", "monthly_peak_at", "monthly_peak_month"])?;
+        let watts = power("monthly_peak_w")?;
+        let at = utc_timestamp(attributes["monthly_peak_at"].as_str().ok_or("ha-atomic-optional-invalid")?)
+            .map_err(|_| "ha-atomic-optional-invalid")?;
+        let calendar = belgian_meter_calendar(at).ok_or("ha-atomic-optional-invalid")?;
+        let month = attributes["monthly_peak_month"].as_str().ok_or("ha-atomic-optional-invalid")?;
+        let expected = format!("{:04}-{:02}", calendar.month / 100, calendar.month % 100);
+        if at <= 0 || at > meter_at || month != expected {
+            return Err("ha-atomic-optional-invalid");
+        }
+        Ok((watts, calendar.month))
+    })();
+    let counters = (|| {
+        let mut totals = [0_i64; 4];
+        for (index, name) in
+            ["import_tariff_1", "import_tariff_2", "export_tariff_1", "export_tariff_2"].iter().enumerate()
+        {
+            let field = format!("{name}_wh");
+            group(name, &[&field])?;
+            totals[index] = attributes[&field]
+                .as_i64()
+                .filter(|value| (0..=999_999_999).contains(value))
+                .ok_or("ha-atomic-optional-invalid")?;
+        }
+        Ok(EnergyTotals {
+            import_tariff1_wh: totals[0],
+            import_tariff2_wh: totals[1],
+            export_tariff1_wh: totals[2],
+            export_tariff2_wh: totals[3],
+        })
+    })();
+    AtomicOptional { demand, peak, counters }
 }
 
 #[derive(serde::Deserialize)]
@@ -370,6 +410,7 @@ fn atomic_payload(value: &Value, now: i64) -> Result<AtomicPayload, &'static str
         publisher_at,
         import_w: a.import_w,
         export_w: a.export_w,
+        optional: atomic_optional(&value["attributes"], meter_at),
     })
 }
 
@@ -1120,62 +1161,26 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaCon
 }
 
 impl HaState {
-    fn feature_issue(&self, now: i64, required: &[usize], require_same_day: bool) -> Option<&'static str> {
+    fn optional_payload(&self, now: i64) -> Result<&AtomicPayload, &'static str> {
         if !self.stats.connected || !self.ready {
-            return Some("ha-meter-data-disconnected");
+            return Err("ha-meter-data-disconnected");
         }
         if self.config.atomic_grid.is_empty() {
-            return Some("ha-meter-data-needs-atomic-grid");
+            return Err("ha-meter-data-needs-atomic-grid");
         }
         if !self.atomic.issue(now, 30.0).is_empty() {
-            return Some("ha-meter-data-grid-unavailable");
+            return Err("ha-meter-data-grid-unavailable");
         }
-        let Some(grid) = self.atomic.sample.as_ref() else {
-            return Some("ha-meter-data-grid-unavailable");
-        };
-        let Some(calendar) = belgian_meter_calendar(grid.payload.meter_at) else {
-            return Some("ha-meter-clock-unsupported");
-        };
-        for &index in required {
-            if self.config.entity_name(index).is_none() {
-                return Some("ha-meter-data-not-mapped");
-            }
-            if self.issues[index].is_some() {
-                return Some("ha-meter-data-invalid");
-            }
-            if !self.live_changes[index] {
-                return Some("ha-meter-data-no-acquisition-evidence");
-            }
-            let Some(sample) = self.samples[index].as_ref() else {
-                return Some("ha-meter-data-unavailable");
-            };
-            if now < sample.at || sample.age(now) as f64 > self.config.meter_data_stale_seconds * 1000.0 {
-                return Some("ha-meter-data-stale");
-            }
-            if sample.at.abs_diff(grid.payload.publisher_at) as f64
-                > self.config.meter_data_max_event_skew_seconds * 1000.0
-            {
-                return Some("ha-meter-data-event-proximity");
-            }
-            if let Some(sample_calendar) = belgian_meter_calendar(sample.at) {
-                if index == MONTHLY_PEAK && sample_calendar.month != calendar.month {
-                    return Some("ha-meter-data-month-boundary");
-                }
-                if require_same_day && sample_calendar.day != calendar.day {
-                    return Some("ha-meter-data-day-boundary");
-                }
-            } else {
-                return Some("ha-meter-clock-unsupported");
-            }
-        }
-        None
+        self.atomic.sample.as_ref().map(|sample| &sample.payload).ok_or("ha-meter-data-grid-unavailable")
     }
 
-    /// Adds optional HA meter values only when each live state-change event is
-    /// bounded in age and close to this atomic callback. This is not a same-
-    /// telegram guarantee; it is an explicitly provisional event-proximity gate.
+    /// Optional values belong exclusively to this accepted atomic sequence.
     pub fn enrich_reading(&self, reading: &mut Reading, now: i64) {
         if reading.source != "home-assistant-atomic" {
+            return;
+        }
+        let Ok(payload) = self.optional_payload(now) else { return };
+        if payload.meter_at != reading.timestamp {
             return;
         }
         let Some(calendar) = belgian_meter_calendar(reading.timestamp) else {
@@ -1187,49 +1192,36 @@ impl HaState {
         reading.meter_minute_of_day = Some(calendar.minute);
         reading.meter_offset_minutes = Some(calendar.offset_minutes);
 
-        if self.feature_issue(now, &[CURRENT_DEMAND], false).is_none() {
-            reading.current_demand_w = self.samples[CURRENT_DEMAND].as_ref().map(|sample| sample.value);
-        }
-        if self.feature_issue(now, &[MONTHLY_PEAK], false).is_none() {
-            reading.monthly_peak_w = self.samples[MONTHLY_PEAK].as_ref().map(|sample| sample.value);
-            reading.monthly_peak_month = Some(calendar.month);
-        }
-        if self
-            .feature_issue(
-                now,
-                &[ENERGY_IMPORT_TARIFF_1, ENERGY_IMPORT_TARIFF_2, ENERGY_EXPORT_TARIFF_1, ENERGY_EXPORT_TARIFF_2],
-                true,
-            )
-            .is_none()
+        reading.current_demand_w = payload.optional.demand.ok();
+        reading.monthly_peak_w = None;
+        reading.monthly_peak_month = None;
+        if let Ok((watts, month)) = payload.optional.peak
+            && month == calendar.month
         {
-            let value = |index: usize| self.samples[index].as_ref().map(|sample| sample.value as i64);
-            if let (
-                Some(import_tariff1_wh),
-                Some(import_tariff2_wh),
-                Some(export_tariff1_wh),
-                Some(export_tariff2_wh),
-            ) = (
-                value(ENERGY_IMPORT_TARIFF_1),
-                value(ENERGY_IMPORT_TARIFF_2),
-                value(ENERGY_EXPORT_TARIFF_1),
-                value(ENERGY_EXPORT_TARIFF_2),
-            ) {
-                reading.energy_totals_wh =
-                    Some(EnergyTotals { import_tariff1_wh, import_tariff2_wh, export_tariff1_wh, export_tariff2_wh });
-            }
+            reading.monthly_peak_w = Some(watts);
+            reading.monthly_peak_month = Some(month);
         }
+        reading.energy_totals_wh = payload.optional.counters.as_ref().ok().cloned();
     }
 
     pub fn peak_data_issue(&self, now: i64) -> Option<&'static str> {
-        self.feature_issue(now, &[CURRENT_DEMAND, MONTHLY_PEAK], false)
+        (|| {
+            let payload = self.optional_payload(now)?;
+            payload.optional.demand?;
+            let (_, month) = payload.optional.peak?;
+            let calendar = belgian_meter_calendar(payload.meter_at).ok_or("ha-meter-clock-unsupported")?;
+            if month != calendar.month {
+                return Err("ha-atomic-optional-previous-month");
+            }
+            Ok(())
+        })()
+        .err()
     }
 
     pub fn daily_data_issue(&self, now: i64) -> Option<&'static str> {
-        self.feature_issue(
-            now,
-            &[ENERGY_IMPORT_TARIFF_1, ENERGY_IMPORT_TARIFF_2, ENERGY_EXPORT_TARIFF_1, ENERGY_EXPORT_TARIFF_2],
-            true,
-        )
+        self.optional_payload(now)
+            .and_then(|payload| payload.optional.counters.as_ref().map(|_| ()).map_err(|issue| *issue))
+            .err()
     }
 
     pub fn diagnostics(&self, now: i64, meter_stale_seconds: f64) -> HaDiagnostics {
@@ -1242,7 +1234,7 @@ impl HaState {
             vec![(self.config.atomic_grid.as_str(), None)]
         };
         ids.extend(
-            (INVERTER_AC..SAMPLE_COUNT).filter_map(|index| self.config.entity_name(index).map(|id| (id, Some(index)))),
+            (INVERTER_AC..=INVERTER_DC).filter_map(|index| self.config.entity_name(index).map(|id| (id, Some(index)))),
         );
         HaDiagnostics {
             connected: self.stats.connected,
@@ -1277,11 +1269,8 @@ impl HaState {
                         evidence_at: s.map(|s| s.at),
                         age_ms: s.map(|s| s.age(now)),
                         issue: self.issues[i].clone().or_else(|| {
-                            let limit = match i {
-                                GRID_IMPORT | GRID_EXPORT => meter_stale_seconds,
-                                INVERTER_AC | INVERTER_DC => self.config.inverter_stale_seconds,
-                                _ => self.config.meter_data_stale_seconds,
-                            };
+                            let limit =
+                                if i < INVERTER_AC { meter_stale_seconds } else { self.config.inverter_stale_seconds };
                             if !self.stats.connected {
                                 Some("ha-disconnected".into())
                             } else if s.is_none() {
@@ -1290,8 +1279,6 @@ impl HaState {
                                 Some("ha-entity-stale".into())
                             } else if i < INVERTER_AC && !self.live_changes[i] {
                                 Some("ha-awaiting-new-grid-evidence".into())
-                            } else if i >= CURRENT_DEMAND && !self.live_changes[i] {
-                                Some("ha-awaiting-live-meter-value-change".into())
                             } else {
                                 None
                             }
@@ -1345,7 +1332,7 @@ impl HaState {
                 }
                 return;
             }
-            if self.config.entity_index(id).is_none_or(|index| index < INVERTER_AC) {
+            if self.config.entity_index(id).is_none_or(|index| !matches!(index, INVERTER_AC | INVERTER_DC)) {
                 return;
             }
         }
@@ -1370,27 +1357,13 @@ impl HaState {
             let raw = state.parse::<f64>().map_err(|_| "ha-invalid-meter-value")?;
             let unit = value["attributes"]["unit_of_measurement"].as_str().ok_or("ha-unit")?;
             let normalized = match index {
-                GRID_IMPORT | GRID_EXPORT | CURRENT_DEMAND | MONTHLY_PEAK if unit == "kW" => raw * 1000.0,
+                GRID_IMPORT | GRID_EXPORT if unit == "kW" => raw * 1000.0,
                 INVERTER_AC if unit == "W" => raw,
                 INVERTER_DC if unit == "W" => raw,
-                ENERGY_IMPORT_TARIFF_1..=ENERGY_EXPORT_TARIFF_2 if unit == "kWh" => {
-                    if value["attributes"]["state_class"] != "total_increasing"
-                        || value["attributes"]["device_class"] != "energy"
-                    {
-                        return Err("ha-counter-class");
-                    }
-                    let wh = raw * 1000.0;
-                    let rounded = wh.round();
-                    if (wh - rounded).abs() > 0.000_001 {
-                        return Err("ha-counter-precision");
-                    }
-                    rounded
-                }
                 _ => return Err("ha-unit"),
             };
             let valid_value = match index {
                 INVERTER_AC => (-1_000_000.0..=1_000_000.0).contains(&normalized),
-                ENERGY_IMPORT_TARIFF_1..=ENERGY_EXPORT_TARIFF_2 => (0.0..=999_999_999.0).contains(&normalized),
                 _ => (0.0..=1_000_000.0).contains(&normalized),
             };
             if !raw.is_finite() || !normalized.is_finite() || !valid_value {

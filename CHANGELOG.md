@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HA heartbeat commands now use strictly increasing IDs instead of reusing ID 3.
   Reusing the second heartbeat ID caused HA to reject the command and the client
   to reconnect. Pongs remain strictly correlated; invalid responses still fail closed.
-- HA peak/daily diagnostics now explain that unchanged optional states provide no
-  acquisition evidence and that reliable operation needs those values in atomic
-  publisher samples; waiting or relaunching cannot make cached values fresh.
+- HA peak/daily features now consume same-telegram optional fields from the
+  additive atomic schema-v1 extension, including unchanged demand/static peaks
+  and idle tariff counters. Null/status/range and peak occurrence-month checks
+  isolate optional failures from grid/GO; old grid-only publishers report the
+  missing extension explicitly, with no separate-entity fallback.
 
 ### Added
 
@@ -28,13 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last-known state-change age; neither can renew grid freshness. A separate
   household-use estimate remains disabled unless explicitly configured with a
   supported topology, AC generation sign, and bounded HA-event proximity.
-- HA quarter-hour peak forecasting and partial daily-energy monitoring from
-  separately mapped demand, current-month peak and total-increasing tariff
-  counters. Optional states require live value changes within independent
-  90-second age and 30-second event-proximity bounds; the UI labels this
-  provisional evidence, uses the atomic UTC meter clock with Brussels DST rules,
-  and reports partial-day baselines. Optional data never affects grid/GO; true
-  same-telegram parity still requires extending the atomic publisher schema.
+- HA quarter-hour peak forecasting and partial daily-energy monitoring use
+  same-telegram demand, peak occurrence/month and four tariff counters, the
+  atomic UTC meter clock with Brussels DST rules, and labeled partial-day
+  baselines. Optional data never affects grid/GO; publisher deployment and live
+  acceptance remain separate from client readiness.
 - Isolated native HA monitoring via an existing absolute
   `SOLAR_SYSTRAY_HA_CONFIG` file, with HA-only atomic startup/reload validation,
   no primary settings seeding and no autostart changes.

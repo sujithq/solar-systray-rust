@@ -275,43 +275,47 @@ explicitly marked stale/retained. Without a valid result, 200 W remains visibly
 live-night learner. Library callers must supply a private cache path with
 `SolarService::start_with_baseline_store` to enable recorded-history retrieval.
 
-#### Provisional HA demand, peak and daily-energy features
+#### Atomic HA demand, peak and daily-energy features
 
-The optional `currentDemand` and `monthlyPeak` mappings expect **kW** and are
-converted to watts. The four `energy*Tariff*` mappings expect **kWh** and require
-HA `device_class: energy` and `state_class: total_increasing`; they are converted
-to whole watt-hours. The mapping defaults use the sensor IDs shown in the example
-above. Any mapping may be set to `""` to disable it. `meterDataStaleSeconds`
-(default **90 s**, configurable 1-86400) and
-`meterDataMaxEventSkewSeconds` (default **30 s**, configurable 0-30) apply
-independently of the 30-second grid and 90-second inverter limits.
+The additive contract is documented in solar-home's
+[entity mapping](https://github.com/sujithq/solar-home/blob/bc779f2e18b3c6018840f3804c90fab0fcd67d3b/docs/entity-mapping.md).
+The configured `atomicGrid` entity can include an additive schema-v1 extension:
+`demand_w`, `monthly_peak_w`, `monthly_peak_at`, `monthly_peak_month`,
+`import_tariff_1_wh`, `import_tariff_2_wh`, `export_tariff_1_wh` and
+`export_tariff_2_wh`. Demand/peak are nonnegative **integer W**, bounded at
+1,000,000; counters are **integer Wh**, bounded at 999,999,999. No HA display-unit
+conversion is applied to these unit-suffixed attributes. `monthly_peak_at` is
+the UTC peak occurrence time, no later than the sample meter timestamp.
+`monthly_peak_month` must exactly match that occurrence's Brussels-local
+`YYYY-MM`; a previous-month peak is never treated as the current month's peak.
+
+The extension's `optional_status` object declares six groups: `demand`,
+`monthly_peak`, `import_tariff_1`, `import_tariff_2`, `export_tariff_1` and
+`export_tariff_2`. Each is `available`, `missing` or `invalid`. Available requires
+all values in the group; missing/invalid requires explicit null values (the
+peak's W/time/month tuple is all-or-none). An absent extension on an older
+schema-v1 grid publisher explicitly leaves these features unavailable without
+affecting grid/GO. Malformed optional groups disable only their feature.
 
 The clock comes only from `atomicGrid.meter_timestamp` in UTC. The client
 converts it to **Europe/Brussels** meter-local date, month, minute and CET/CEST
 offset using the EU DST transition rules; it never uses the PC's timezone or
 the separate HA timestamp entity. Quarter calculations use the same meter
-instant. The `monthlyPeak` mapping is specifically the current-month peak;
-the client associates it with the atomic meter's local month and rejects a
-peak event from another month.
+instant.
 
-These six values are separate HA entities, not part of the publisher's atomic
-grid payload. To avoid silently combining cached states as if they were one
-telegram, each required value must have a genuine live `last_changed` value
-change after connection, be within `meterDataStaleSeconds`, and have its
-`last_changed` event within `meterDataMaxEventSkewSeconds` of the atomic
-`received_at` event. For daily counters, the event must also be on the same
-Brussels meter-local day. This is only a bounded **HA event-proximity** gate;
-it does not prove a same-telegram read or simultaneous physical acquisition.
-Snapshots, equal values, `last_updated`, `last_reported`, unrelated entities,
-heartbeats and connectivity do not refresh optional data. After reconnect, new
-live changes are required again. Event-driven monthly peaks and unchanged tariff
-counters can therefore leave these features unavailable indefinitely; relaunching
-does not create acquisition evidence. The tray reports when an unchanged value has
-no acquisition evidence rather than suggesting that waiting or restarting will
-make it fresh. Reliable operation requires the atomic publisher to include demand,
-peak and tariff counters under the same advancing sample sequence; separate HA
-entity changes cannot reliably support these features. Optional-data failure
-never changes atomic grid freshness or GO eligibility.
+Only the current accepted atomic telegram supplies optional data. Advancing
+session/sequence/meter/callback provenance supports **unchanged** demand, static
+monthly peaks and idle tariff counters; there is no numerical-change requirement.
+Optional data shares the atomic grid's strictly-under-30-second age, replay and
+reconnect gates. A snapshot only establishes a watermark, and a new live atomic
+sample is required after reconnect. Missing fields are never carried forward,
+and separate HA entities, heartbeats or cached states cannot fill them.
+
+The earlier six separate mappings (`currentDemand`, `monthlyPeak`,
+`energyImportTariff1/2`, `energyExportTariff1/2`) and
+`meterDataStaleSeconds`/`meterDataMaxEventSkewSeconds` remain accepted and
+round-tripped for configuration compatibility but are no longer subscribed to
+or used for these features. No new mappings or private-config changes are needed.
 
 The quarter-hour engine uses the atomic grid import, validated current-demand
 and current-month-peak states, and the meter clock. Daily energy reuses the
@@ -323,12 +327,10 @@ meter day, while a day or month boundary is evaluated in Brussels time,
 including DST. No inverter yield or instantaneous-power estimate substitutes
 for tariff counters.
 
-For decision-grade parity rather than this provisional event-proximity display,
-the acquisition-side atomic publisher would need to include validated
-same-telegram current demand, current-month peak plus its month identity, and
-all four cumulative tariff counters under the same advancing sequence and
-timestamps (or publish an equivalently correlated schema). This client does not
-assume those fields exist today.
+This is client support, not evidence that the publisher extension is deployed.
+Live acceptance still requires observing extended telegrams, unchanged optional
+values across advancing sequences, unavailable/recovery behavior, month identity
+and partial counter deltas. Physical measurement correctness remains unverified.
 
 #### Conservative separate-entity mode
 
@@ -436,9 +438,8 @@ physical freshness are not verified. This slice does **not** map Sungrow yield
 counters or treat connectivity as inverter-data freshness. Household use remains
 off unless its explicit topology/sign and freshness/event-proximity gates are
 configured; enabling them does not establish physical validation. Daily energy
-and quarter-hour forecast can use mapped HA sensors only through the provisional
-event-proximity gates above; those separate HA values are not yet part of the
-atomic publisher schema and can remain unavailable. No instantaneous-power or
+and quarter-hour forecast require the additive atomic fields above; old grid-only
+publishers leave them unavailable. No instantaneous-power or
 inverter-yield approximation substitutes for them.
 
 Provider grid-freshness monitoring and a user-observed native grid/error/recovery
