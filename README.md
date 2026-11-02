@@ -362,9 +362,18 @@ does not round to hours, mix statistics with raw history, or add overlapping
 atomic/live deltas. The display shows the exact period/as-of time, whole-Wh
 precision, provenance and refresh age. Recorded held values are not proof of
 physical freshness, same-telegram coherence or uninterrupted acquisition.
-Unknown/unavailable values, wrong units/classes, missing boundary/entity rows,
+Wrong units/classes, malformed numeric values, missing boundary/entity rows,
 unordered events, inconsistent chunk boundaries or a counter decrease prevent
-publishing a new reported total. Missing recorder events/physical outages that
+publishing a new reported total. Midnight and final held states must be valid.
+Intermediate `unknown`/`unavailable` states do not erase cumulative endpoint
+deltas when subsequent valid totals remain nondecreasing. The menu counts those
+rows (including held repeats) as **Recorded gaps**, explicitly warning that reset
+continuity across gaps is unverified. No missing/reset energy is inferred; a
+reset that recovers above its earlier value inside an unobserved gap cannot be
+detected from these endpoints, so this is not a reset-corrected statistics total.
+Recorder event timestamps may have sub-millisecond precision; ordering retains
+that precision even though displayed timestamps use milliseconds.
+Missing recorder events/physical outages that
 HA never recorded cannot be detected from held history; this is explicitly a
 reported-state view, not a reconstruction of missing physical energy.
 

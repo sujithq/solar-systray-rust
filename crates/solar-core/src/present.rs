@@ -390,6 +390,14 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
             row("Boundary", "HA last recorded state held at midnight; physical boundary timing unverified", Tone::Warn),
             row("Refresh age", format!("{age}s{}", if age > 120 { "; stale retained result" } else { "" }), Tone::Warn),
         ];
+        let unavailable: u32 = reported.unavailable_rows.iter().sum();
+        if unavailable > 0 {
+            rows.push(row(
+                "Recorded gaps",
+                format!("{unavailable} unknown/unavailable tariff rows (including held repeats); reported endpoint deltas only; reset continuity across gaps unverified"),
+                Tone::Warn,
+            ));
+        }
         if let Some(issue) = &s.reported_energy_issue {
             rows.push(row("Recorded energy refresh", reported_energy_text(issue), Tone::Warn));
         }

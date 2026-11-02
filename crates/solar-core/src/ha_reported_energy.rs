@@ -12,6 +12,8 @@ pub struct ReportedEnergy {
     pub import_wh: i64,
     pub export_wh: i64,
     pub recorded_points: [i64; 4],
+    #[serde(default)]
+    pub unavailable_rows: [u32; 4],
 }
 
 pub(crate) struct ReportedSamples {
@@ -21,6 +23,9 @@ pub(crate) struct ReportedSamples {
     first: [Option<i64>; 4],
     last: [Option<i64>; 4],
     last_at: [Option<i64>; 4],
+    last_event_at: [Option<f64>; 4],
+    last_available: [bool; 4],
+    unavailable_rows: [u32; 4],
     records: usize,
 }
 
@@ -31,7 +36,18 @@ impl ReportedSamples {
         {
             return Err("reported-energy-window-or-mapping");
         }
-        Ok(Self { start, end, entities, first: [None; 4], last: [None; 4], last_at: [None; 4], records: 0 })
+        Ok(Self {
+            start,
+            end,
+            entities,
+            first: [None; 4],
+            last: [None; 4],
+            last_at: [None; 4],
+            last_event_at: [None; 4],
+            last_available: [false; 4],
+            unavailable_rows: [0; 4],
+            records: 0,
+        })
     }
 
     pub fn append(&mut self, result: &Value, chunk_start: i64, chunk_end: i64) -> Result<(), &'static str> {
@@ -50,10 +66,30 @@ impl ReportedSamples {
                     return Err("reported-energy-record-limit");
                 }
                 let at = row["lu"].as_f64().filter(|v| v.is_finite()).ok_or("reported-energy-time")? * 1000.0;
-                if at < chunk_start as f64 || at >= chunk_end as f64 || at.fract().abs() > 0.01 {
+                if at < chunk_start as f64 || at >= chunk_end as f64 {
                     return Err("reported-energy-time");
                 }
-                let at = at.round() as i64;
+                let state = row["s"].as_str().ok_or("reported-energy-invalid-state")?;
+                let unavailable = matches!(state, "unknown" | "unavailable");
+                if position == 0 {
+                    if (at - chunk_start as f64).abs() > 0.01 {
+                        return Err("reported-energy-missing-boundary");
+                    }
+                    if self.last_event_at[index].is_some() && self.last_available[index] == unavailable {
+                        return Err("reported-energy-boundary-mismatch");
+                    }
+                    if chunk_start == self.start && unavailable {
+                        return Err("reported-energy-missing-boundary");
+                    }
+                } else if self.last_event_at[index].is_some_and(|last| at <= last) {
+                    return Err("reported-energy-order");
+                }
+                self.last_event_at[index] = Some(at);
+                if unavailable {
+                    self.last_available[index] = false;
+                    self.unavailable_rows[index] += 1;
+                    continue;
+                }
                 let attributes = &row["a"];
                 if attributes["unit_of_measurement"] != "kWh"
                     || attributes["device_class"] != "energy"
@@ -61,7 +97,6 @@ impl ReportedSamples {
                 {
                     return Err("reported-energy-unit-or-class");
                 }
-                let state = row["s"].as_str().ok_or("reported-energy-invalid-state")?;
                 let kwh = state.parse::<f64>().map_err(|_| "reported-energy-invalid-state")?;
                 let wh = kwh * 1000.0;
                 if !wh.is_finite() || !(0.0..=999_999_999.0).contains(&wh) || (wh - wh.round()).abs() > 0.000_001 {
@@ -69,23 +104,19 @@ impl ReportedSamples {
                 }
                 let wh = wh.round() as i64;
                 if position == 0 {
-                    if at != chunk_start {
-                        return Err("reported-energy-missing-boundary");
-                    }
                     // This is the recorder's projected held start-state, NOT a
                     // newly acquired reading. Consecutive chunks must agree.
-                    if self.last[index].is_some_and(|last| last != wh) {
+                    if self.last_available[index] && self.last[index].is_some_and(|last| last != wh) {
                         return Err("reported-energy-boundary-mismatch");
                     }
                     self.first[index].get_or_insert(wh);
-                } else if self.last_at[index].is_some_and(|last| at <= last) {
-                    return Err("reported-energy-order");
                 }
                 if self.last[index].is_some_and(|last| wh < last) {
                     return Err("reported-energy-reset");
                 }
                 self.last[index] = Some(wh);
-                self.last_at[index] = Some(at);
+                self.last_at[index] = Some(at.floor() as i64);
+                self.last_available[index] = true;
             }
         }
         Ok(())
@@ -95,6 +126,9 @@ impl ReportedSamples {
         let mut delta = [0; 4];
         let mut recorded_points = [0; 4];
         for i in 0..4 {
+            if !self.last_available[i] {
+                return Err("reported-energy-endpoint-unavailable");
+            }
             delta[i] = self.last[i].ok_or("reported-energy-missing-entity")?
                 - self.first[i].ok_or("reported-energy-missing-boundary")?;
             recorded_points[i] = self.last_at[i].ok_or("reported-energy-time")?;
@@ -105,6 +139,7 @@ impl ReportedSamples {
             import_wh: delta[0] + delta[1],
             export_wh: delta[2] + delta[3],
             recorded_points,
+            unavailable_rows: self.unavailable_rows,
         })
     }
 }
@@ -143,7 +178,7 @@ mod tests {
     fn missing_boundary_unknown_wrong_units_reset_and_inconsistent_chunks_fail() {
         let (start, ids) = setup();
         for (value, at, expected) in [
-            ("unknown", start, "reported-energy-invalid-state"),
+            ("unknown", start, "reported-energy-missing-boundary"),
             ("10", start + 1000, "reported-energy-missing-boundary"),
             ("-1", start, "reported-energy-invalid-state"),
         ] {
@@ -156,6 +191,81 @@ mod tests {
             s.append(&json!({ids[0].clone():[row(start,"10"),row(start+1000,"0")]}), start, start + 60_000),
             Err("reported-energy-reset")
         );
+    }
+
+    #[test]
+    fn intermediate_unavailable_spanning_chunks_preserves_reported_delta_but_not_reset_assurance() {
+        let (start, ids) = setup();
+        let mut samples = ReportedSamples::new(start, start + 600_000, ids.clone()).unwrap();
+        let mut first = serde_json::Map::new();
+        let mut second = serde_json::Map::new();
+        for id in &ids {
+            first.insert(id.clone(), json!([row(start, "10.000"), row(start + 60_000, "unavailable")]));
+            second.insert(
+                id.clone(),
+                json!([
+                    row(start + 300_000, "unavailable"),
+                    row(start + 301_000, "unknown"),
+                    row(start + 400_000, "10.100")
+                ]),
+            );
+        }
+        samples.append(&Value::Object(first), start, start + 300_000).unwrap();
+        samples.append(&Value::Object(second), start + 300_000, start + 600_000).unwrap();
+        let report = samples.finish().unwrap();
+        assert_eq!(report.import_wh, 200);
+        assert_eq!(report.export_wh, 200);
+        assert_eq!(report.unavailable_rows, [3; 4]);
+    }
+
+    #[test]
+    fn fractional_recorder_event_times_are_ordered_without_requiring_integer_milliseconds() {
+        let (start, ids) = setup();
+        let mut samples = ReportedSamples::new(start, start + 60_000, ids.clone()).unwrap();
+        let mut result = serde_json::Map::new();
+        for id in &ids {
+            let mut first = row(start + 1000, "10.001");
+            let mut second = row(start + 1000, "10.002");
+            first["lu"] = json!(start as f64 / 1000.0 + 1.0001);
+            second["lu"] = json!(start as f64 / 1000.0 + 1.0005);
+            result.insert(id.clone(), json!([row(start, "10.000"), first, second]));
+        }
+        samples.append(&Value::Object(result), start, start + 60_000).unwrap();
+        assert_eq!(samples.finish().unwrap().import_wh, 4);
+    }
+
+    #[test]
+    fn availability_gaps_never_hide_observed_resets_bad_metadata_or_missing_endpoints() {
+        let (start, ids) = setup();
+        for (last, expected) in [
+            ("9.999", "reported-energy-reset"),
+            ("-1", "reported-energy-invalid-state"),
+            ("broken", "reported-energy-invalid-state"),
+        ] {
+            let mut samples = ReportedSamples::new(start, start + 60_000, ids.clone()).unwrap();
+            let result = json!({ids[0].clone():[
+                row(start,"10.000"),row(start+1000,"unknown"),row(start+2000,last)
+            ]});
+            assert_eq!(samples.append(&result, start, start + 60_000), Err(expected));
+        }
+        let mut bad_unit = row(start + 2000, "10.100");
+        bad_unit["a"]["unit_of_measurement"] = json!("W");
+        let mut samples = ReportedSamples::new(start, start + 60_000, ids.clone()).unwrap();
+        assert_eq!(
+            samples.append(
+                &json!({ids[0].clone():[row(start,"10.000"),row(start+1000,"unknown"),bad_unit]}),
+                start,
+                start + 60_000
+            ),
+            Err("reported-energy-unit-or-class")
+        );
+        let mut result = serde_json::Map::new();
+        for id in &ids {
+            result.insert(id.clone(), json!([row(start, "10.000"), row(start + 1000, "unavailable")]));
+        }
+        let mut samples = ReportedSamples::new(start, start + 60_000, ids).unwrap();
+        samples.append(&Value::Object(result), start, start + 60_000).unwrap();
+        assert_eq!(samples.finish(), Err("reported-energy-endpoint-unavailable"));
     }
 
     #[test]
@@ -222,6 +332,7 @@ mod tests {
             import_wh: 2100,
             export_wh: 200,
             recorded_points: [start; 4],
+            unavailable_rows: [0; 4],
         };
         runtime.set_reported_energy(Ok(report.clone()), start + 70_000);
         let s = runtime.snapshot(start + 70_000);

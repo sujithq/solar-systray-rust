@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HA reported Today totals now retain explicitly gap-labeled cumulative
+  endpoint deltas across intermediate unknown/unavailable recorder rows,
+  without masking observed resets or invalid endpoints. Recorder timestamps
+  accept sub-millisecond precision instead of rejecting valid HA event times.
 - HA Today now shows pending/loading status for the original tariff-history
   calculation before a result or error arrives, so the atomic partial fallback
   no longer silently conceals an in-progress full-day reported-energy query.

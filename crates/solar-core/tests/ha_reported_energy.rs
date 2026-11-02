@@ -23,6 +23,7 @@ fn reported_tariff_energy_has_its_own_provenance_without_creating_a_live_reading
         import_wh: 2100,
         export_wh: 600,
         recorded_points: [start; 4],
+        unavailable_rows: [9; 4],
     });
     let info = solar_info(&snapshot);
     let today = info.section("Today").unwrap();
@@ -30,6 +31,8 @@ fn reported_tariff_energy_has_its_own_provenance_without_creating_a_live_reading
     assert_eq!(today.value("Exported"), Some("0.600 kWh"));
     assert!(today.value("Coverage").unwrap().contains("held midnight boundary"));
     assert!(today.value("Source").unwrap().contains("not atomic acquisition"));
+    assert!(today.value("Recorded gaps").unwrap().contains("36 unknown/unavailable"));
+    assert!(today.value("Recorded gaps").unwrap().contains("reset continuity across gaps unverified"));
     assert!(snapshot.reading_at.is_none());
     assert!(!snapshot.evaluation.safe_to_start);
     let restored: solar_core::Snapshot = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
