@@ -44,22 +44,22 @@ On top of either style:
 - **Orange-red dot / top bar**: peak warning. The quarter-hour forecast will exceed this
   month's peak (or the 2.5 kW capacity-tariff minimum), or the peak has already been reached.
 
-Hovering the icon shows a compact summary: the headline, the grid power (plus PV when an
-inverter is configured), the appliance's start threshold, the quarter-hour forecast and today's
-energy, for example `GO - START NOW` / `Export 2264 W | PV 3.1 kW`.
+Hovering the icon shows a compact summary: the headline, grid power (plus PV for Sungrow
+or separately labeled AC/DC for HA when mapped), the appliance's start threshold,
+quarter-hour forecast and today's energy.
 
 ### Menu
 
 Left- or right-click the icon:
 
 - **Headline** with the reason, for example `GO IN 4:38` and `Stable for 0:23 of 5:00`.
-- **Power now**: grid export and import; solar panels (PV), inverter output and household use
-  when a Sungrow inverter is configured; and the night baseline learned from the meter.
+- **Power now**: grid export/import; Sungrow values or separately mapped HA inverter AC and DC;
+  household use only when its derivation is available; and the night baseline.
 - **Appliance**: pick the appliance to plan for; shows the export needed to start it.
 - **Quarter-hour peak**: current demand, monthly peak, forecast, and how much import to cut.
 - **Today**: energy imported and exported today, by the meter's clock.
-- **Connections**: who reads the meter (`Solar Agent` or `Solar Systray`), sunrise and
-  sunset, meter and inverter status.
+- **Connections**: who reads the meter (`Solar Agent`, `Solar Systray` or HA), sunrise and
+  sunset, meter/inverter state and the HA optional-inverter age limitations.
 - **Simulation** (when simulating): switch scenarios or set a grid power.
 - **Icon style**, **Notifications**, **Start at sign-in**, **Open config file**,
   **Reload config** and **Quit**.
@@ -121,7 +121,8 @@ Merge these sections into the `solar` object of your existing config:
     "atomicGrid": "sensor.dsmr_atomic_grid_sample",
     "gridImport": "sensor.electricity_meter_power_consumption",
     "gridExport": "sensor.electricity_meter_power_production",
-    "activePower": "",
+    "activePower": "sensor.sg5_0rs_local_total_active_power",
+    "dcPower": "sensor.sg5_0rs_local_total_dc_power",
     "inverterStaleSeconds": 90,
     "gridSkewSeconds": 5
   },
@@ -190,9 +191,9 @@ overflow stays unavailable until a deliberate client restart. Diagnostics distin
 atomic telegram evidence from provisional HA value-change evidence and expose the
 sequence, meter/callback times and sample age separately from HA metadata.
 
-**Publisher deployment and live acceptance are still pending.** Atomic client
-support has been exercised with mocks only; measurement correctness remains the
-user working assumption, not verified device behavior. Do not turn an advancing
+The publisher has been deployed separately, and user-run provider monitoring
+passed the 300-second freshness/unchanged-sequence gates. Measurement correctness
+remains the user working assumption, not verified physical calibration. Do not turn an advancing
 built-in DSMR timestamp into a freshness signal: it can precede power updates or
 come from a telegram missing required powers. Timestamp-only signals, arbitrary
 debounce and heartbeat/report times do not establish an atomic sample.
@@ -208,10 +209,24 @@ independently younger than `decision.staleAfterSeconds` (default **30 s**), with
 sample skew at most `gridSkewSeconds` (default **5 s**, configurable 0-30 s).
 A coherent pair advances the decision sample only when a member has a newer
 accepted value change, never from unrelated entities or display refreshes.
-In either grid mode, optional `activePower` may map to `sensor.sg5_0rs_local_total_active_power` in **W**;
-it expires independently after `inverterStaleSeconds` (default **90 s**).
-Leaving it empty disables AC. Invalid/unavailable AC affects AC display only,
-not otherwise valid grid decisions.
+In either grid mode, optional `activePower` and `dcPower` may map independently to
+`sensor.sg5_0rs_local_total_active_power` (AC) and `sensor.sg5_0rs_local_total_dc_power`
+(DC), both in **W**. The Power now menu shows **Inverter output (AC)** and
+**Solar panels (DC)** as distinct values. Either may be left empty to disable that
+display. Each reading expires independently after `inverterStaleSeconds` (default
+**90 s**); missing, stale, unavailable, malformed, non-finite, out-of-range or
+wrong-unit values affect only that optional display, never atomic grid freshness or
+GO. Bounded signed AC is displayed with its sign unchanged; it is not absolutized
+or used to infer household consumption.
+
+HA exposes no acquisition timestamp/sequence for these optional inverter entities
+in this slice. Their age is therefore only **last-known HA state-change age**,
+not proof that the inverter was polled or that an unchanged zero was freshly
+acquired. The client preserves that original age across equal-value/attribute-only
+updates and reconnect snapshots, and does not use `last_reported`, connectivity,
+or heartbeat activity to renew it. The Connections menu labels this limitation
+explicitly. Physical AC sign, DC interpretation and topology remain unvalidated;
+household derivation stays unavailable.
 
 For the separate-entity mode, diagnostics label HA value-change times as provisional evidence, preserve HA
 `last_changed`/`last_updated`/`last_reported` separately, and track receive age
@@ -232,16 +247,19 @@ incoherent pairs clear recommendations. Transport/authentication failures clear
 them immediately; recovery must earn a new stability interval. The existing
 offline/recovery notification preferences remain available.
 
-AC is not PV/DC. This slice does **not** map DC power, Sungrow yield counters,
-connectivity or operating state, nor derive household use from unverified AC
-topology/signs. Daily energy and quarter-hour demand/monthly-peak/forecast features
+AC and DC are displayed as distinct optional readings, but their meaning and
+physical freshness are not verified. This slice does **not** map Sungrow yield
+counters, treat connectivity as inverter-data freshness, or derive household use
+from unverified AC topology/signs. Daily energy and quarter-hour demand/monthly-peak/forecast features
 remain explicitly unavailable until full meter calendar/timezone fields, counters,
 demand and peak mappings are established. No instantaneous-power or inverter-yield
 approximation substitutes for them.
 
-Live freshness UI validation failed previously; daytime PV/sign/topology checks
-and real update cadence remain pending. This implementation and its synthetic
-tests do not constitute device validation or authorize deployment/cutover.
+Provider grid-freshness monitoring and a user-observed native grid/error/recovery
+smoke have passed. Optional AC/DC display with these mappings still needs live
+observation. Daytime PV/sign/topology, inverter acquisition freshness and physical
+measurement calibration remain pending; a changing or zero display is not proof
+of a successful acquisition. These checks do not authorize deployment/cutover.
 
 ### Opt-in monitoring acceptance harness
 
@@ -258,10 +276,15 @@ for a 31-second stale check, then starts a new client for 15 seconds to check
 recovery/stability reset. It never changes HA, appliances or meter acquisition.
 Output is a sanitized JSON report of durations/counts and safety outcomes, not
 power readings, absolute timestamps, sessions, tokens or device identifiers.
+For each configured AC/DC sensor, it separately counts fresh last-state-change,
+stale, unavailable and invalid polls, plus maximum last-known state-change age;
+these observations are informational and cannot affect atomic-grid acceptance.
 It includes reconnect counts, allowlisted client-code/predicate polling histograms,
 longest observed continuous fresh/candidate intervals and maximum engine stability.
-`protocol_errors` is retained for old report readers but means aggregate client
-errors, including validation failures; `client_errors` names it accurately.
+`protocol_errors` is retained for old report readers but means aggregate grid/client
+transport, protocol and grid-validation errors; `client_errors` names it accurately.
+Optional inverter validation failures stay in their own per-entity diagnostics and
+do not fail or refresh the atomic grid.
 Error deltas are attributed to the latest polled code, not an exact event log:
 intermediate errors can be coalesced or superseded. Continuity is sampled every
 200 ms and resets on gaps over 500 ms; it cannot prove unsampled transitions.

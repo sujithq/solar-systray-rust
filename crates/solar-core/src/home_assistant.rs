@@ -18,6 +18,7 @@ pub struct HaConfig {
     pub grid_export: String,
     pub atomic_grid: String,
     pub active_power: String,
+    pub dc_power: String,
     pub inverter_stale_seconds: f64,
     pub grid_skew_seconds: f64,
 }
@@ -33,6 +34,7 @@ impl HaConfig {
             grid_export: text("gridExport")?.into(),
             atomic_grid: text("atomicGrid")?.into(),
             active_power: text("activePower")?.into(),
+            dc_power: text("dcPower")?.into(),
             inverter_stale_seconds: v["inverterStaleSeconds"].as_f64().ok_or_else(error)?,
             grid_skew_seconds: v["gridSkewSeconds"].as_f64().ok_or_else(error)?,
         };
@@ -50,14 +52,19 @@ impl HaConfig {
             || !entity(&config.grid_import)
             || !entity(&config.grid_export)
             || (!config.active_power.is_empty() && !entity(&config.active_power))
+            || (!config.dc_power.is_empty() && !entity(&config.dc_power))
             || (!config.atomic_grid.is_empty()
                 && (!entity(&config.atomic_grid)
                     || config.atomic_grid == config.grid_import
                     || config.atomic_grid == config.grid_export
-                    || config.atomic_grid == config.active_power))
+                    || config.atomic_grid == config.active_power
+                    || config.atomic_grid == config.dc_power))
             || config.grid_import == config.grid_export
             || config.active_power == config.grid_import
             || config.active_power == config.grid_export
+            || config.dc_power == config.grid_import
+            || config.dc_power == config.grid_export
+            || (!config.active_power.is_empty() && config.active_power == config.dc_power)
             || !config.inverter_stale_seconds.is_finite()
             || !(1.0..=86400.0).contains(&config.inverter_stale_seconds)
             || !config.grid_skew_seconds.is_finite()
@@ -96,7 +103,8 @@ impl HaConfig {
             "endpoint": self.endpoint, "tokenEnv": self.token_env,
             "gridImport": self.grid_import, "gridExport": self.grid_export,
             "atomicGrid": self.atomic_grid,
-            "activePower": self.active_power, "inverterStaleSeconds": self.inverter_stale_seconds,
+            "activePower": self.active_power, "dcPower": self.dc_power,
+            "inverterStaleSeconds": self.inverter_stale_seconds,
             "gridSkewSeconds": self.grid_skew_seconds
         })
     }
@@ -371,6 +379,10 @@ pub struct HaDiagnostics {
     pub initialized: bool,
     pub evidence: String,
     pub entities: Vec<EntityDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_power_entity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dc_power_entity: Option<String>,
 }
 
 #[derive(Clone)]
@@ -383,12 +395,12 @@ struct Observation {
 
 pub struct HaState {
     config: HaConfig,
-    samples: [Option<Sample>; 3],
+    samples: [Option<Sample>; 4],
     // High-water marks survive removal/reconnect so replay cannot renew old samples.
-    history: [Option<Sample>; 3],
-    observations: [Option<Observation>; 3],
-    issues: [Option<String>; 3],
-    live_changes: [bool; 3],
+    history: [Option<Sample>; 4],
+    observations: [Option<Observation>; 4],
+    issues: [Option<String>; 4],
+    live_changes: [bool; 4],
     atomic: AtomicGrid,
     pub stats: MeterStats,
     ready: bool,
@@ -398,11 +410,11 @@ impl HaState {
     pub fn new(config: HaConfig) -> Self {
         Self {
             config,
-            samples: [None, None, None],
-            history: [None, None, None],
-            observations: [None, None, None],
-            issues: [None, None, None],
-            live_changes: [false; 3],
+            samples: [None, None, None, None],
+            history: [None, None, None, None],
+            observations: [None, None, None, None],
+            issues: [None, None, None, None],
+            live_changes: [false; 4],
             atomic: AtomicGrid::default(),
             stats: MeterStats::default(),
             ready: false,
@@ -518,6 +530,7 @@ fn run_authenticated_session(
         } else {
             id == config.atomic_grid
         }) || (!config.active_power.is_empty() && id == config.active_power)
+            || (!config.dc_power.is_empty() && id == config.dc_power)
     };
     while !stop.load(Ordering::Relaxed) {
         if (phase < 4 && Instant::now() >= deadline)
@@ -675,29 +688,35 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaCon
 
 impl HaState {
     pub fn diagnostics(&self, now: i64, meter_stale_seconds: f64) -> HaDiagnostics {
-        let ids = if self.config.atomic_grid.is_empty() {
-            vec![&self.config.grid_import, &self.config.grid_export, &self.config.active_power]
+        let mut ids = if self.config.atomic_grid.is_empty() {
+            vec![(&self.config.grid_import, Some(0)), (&self.config.grid_export, Some(1))]
         } else {
-            vec![&self.config.atomic_grid, &self.config.active_power]
+            vec![(&self.config.atomic_grid, None)]
         };
+        ids.extend(
+            [(&self.config.active_power, 2), (&self.config.dc_power, 3)]
+                .into_iter()
+                .filter(|(id, _)| !id.is_empty())
+                .map(|(id, index)| (id, Some(index))),
+        );
         HaDiagnostics {
             connected: self.stats.connected,
             initialized: self.ready,
             evidence: if self.config.atomic_grid.is_empty() {
                 "provisional HA value-change evidence; physical acquisition unverified"
             } else {
-                "atomic checksum-accepted telegram sequence; publisher/live acceptance pending"
+                "atomic checksum-accepted telegram sequence; physical measurement validation pending"
             }
             .into(),
+            active_power_entity: (!self.config.active_power.is_empty()).then(|| self.config.active_power.clone()),
+            dc_power_entity: (!self.config.dc_power.is_empty()).then(|| self.config.dc_power.clone()),
             entities: ids
                 .iter()
-                .enumerate()
-                .filter(|(_, id)| !id.is_empty())
-                .map(|(i, id)| {
-                    if !self.config.atomic_grid.is_empty() && i == 0 {
+                .map(|(id, index)| {
+                    if index.is_none() {
                         return self.atomic.diagnostic((*id).clone(), now, meter_stale_seconds);
                     }
-                    let i = if self.config.atomic_grid.is_empty() { i } else { 2 };
+                    let i = index.unwrap();
                     let o = self.observations[i].as_ref();
                     let s = self.samples[i].as_ref();
                     EntityDiagnostic {
@@ -733,8 +752,8 @@ impl HaState {
 
     pub fn disconnect(&mut self, issue: &str) {
         self.atomic.invalidate(issue);
-        self.samples = [None, None, None];
-        self.live_changes = [false; 3];
+        self.samples = [None, None, None, None];
+        self.live_changes = [false; 4];
         self.ready = false;
         self.stats.connected = false;
         self.stats.errors += 1;
@@ -756,6 +775,7 @@ impl HaState {
         } else {
             id == self.config.atomic_grid
         }) || (!self.config.active_power.is_empty() && id == self.config.active_power)
+            || (!self.config.dc_power.is_empty() && id == self.config.dc_power)
     }
 
     pub fn state(&mut self, id: &str, value: &Value, now: i64) {
@@ -775,7 +795,7 @@ impl HaState {
                 }
                 return;
             }
-            if id != self.config.active_power {
+            if id != self.config.active_power && id != self.config.dc_power {
                 return;
             }
         }
@@ -785,6 +805,8 @@ impl HaState {
             1
         } else if !self.config.active_power.is_empty() && id == self.config.active_power {
             2
+        } else if !self.config.dc_power.is_empty() && id == self.config.dc_power {
+            3
         } else {
             return;
         };
@@ -811,7 +833,12 @@ impl HaState {
                 return Err("ha-unit");
             }
             let watts = watts * if index < 2 { 1000.0 } else { 1.0 };
-            if !watts.is_finite() || !(0.0..=1_000_000.0).contains(&watts) {
+            let valid_power = if index == 2 {
+                (-1_000_000.0..=1_000_000.0).contains(&watts)
+            } else {
+                (0.0..=1_000_000.0).contains(&watts)
+            };
+            if !watts.is_finite() || !valid_power {
                 return Err("ha-invalid-power");
             }
             let at = chrono::DateTime::parse_from_rfc3339(value["last_changed"].as_str().ok_or("ha-timestamp")?)
@@ -840,8 +867,10 @@ impl HaState {
                         self.samples[index] = None;
                         self.live_changes[index] = false;
                         self.issues[index] = Some("ha-out-of-order".into());
-                        self.stats.last_issue = Some("ha-out-of-order".into());
-                        self.stats.errors += 1;
+                        if index < 2 {
+                            self.stats.last_issue = Some("ha-out-of-order".into());
+                            self.stats.errors += 1;
+                        }
                         return;
                     }
                     if sample.watts == old.watts {
@@ -861,8 +890,10 @@ impl HaState {
                 self.samples[index] = None;
                 self.live_changes[index] = false;
                 self.issues[index] = Some(issue.into());
-                self.stats.errors += 1;
-                self.stats.last_issue = Some(issue.into());
+                if index < 2 {
+                    self.stats.errors += 1;
+                    self.stats.last_issue = Some(issue.into());
+                }
             }
         }
     }
@@ -923,26 +954,32 @@ impl HaState {
     }
 
     pub fn inverter(&self, now: i64) -> InverterSnapshot {
-        if self.config.active_power.is_empty() {
+        if self.config.active_power.is_empty() && self.config.dc_power.is_empty() {
             return InverterSnapshot::disabled();
         }
-        match &self.samples[2] {
-            Some(s)
-                if self.ready
-                    && self.stats.connected
-                    && now >= s.at
-                    && s.age(now) as f64 <= self.config.inverter_stale_seconds * 1000.0 =>
-            {
-                InverterSnapshot {
-                    status: InverterStatus::Online,
-                    active_power_w: Some(s.watts),
-                    pv_power_w: None,
-                    household_use_w: None,
-                    timestamp: Some(s.at),
-                    issue: None,
-                }
-            }
-            _ => InverterSnapshot::without_reading(InverterStatus::Offline, Some("ha-ac-unavailable-or-stale".into())),
+        let is_fresh = |s: &Sample| {
+            self.ready
+                && self.stats.connected
+                && now >= s.at
+                && s.age(now) as f64 <= self.config.inverter_stale_seconds * 1000.0
+        };
+        let ac = self.samples[2].as_ref().filter(|s| is_fresh(s));
+        let dc = self.samples[3].as_ref().filter(|s| is_fresh(s));
+        let active_power_w = ac.map(|s| s.watts);
+        let pv_power_w = dc.map(|s| s.watts);
+        if active_power_w.is_none() && pv_power_w.is_none() {
+            return InverterSnapshot::without_reading(
+                InverterStatus::Offline,
+                Some("ha-inverter-unavailable-or-stale".into()),
+            );
+        }
+        InverterSnapshot {
+            status: InverterStatus::Online,
+            active_power_w,
+            pv_power_w,
+            household_use_w: None,
+            timestamp: ac.map(|s| s.at).into_iter().chain(dc.map(|s| s.at)).max(),
+            issue: None,
         }
     }
 

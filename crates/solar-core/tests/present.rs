@@ -3,6 +3,7 @@
 use solar_core::SolarConfig;
 use solar_core::daily_energy::DailyEnergyResult;
 use solar_core::decision::{Level, State};
+use solar_core::home_assistant::{EntityDiagnostic, HaDiagnostics};
 use solar_core::mock::MOCK_SCENARIOS;
 use solar_core::peak_forecast::Forecast;
 use solar_core::present::{
@@ -225,6 +226,72 @@ fn info_labels_the_fallback_baseline_while_learning() {
     }));
     assert_eq!(value(&first_run, "Power now", "Night baseline"), "200 W default; learning overnight");
     assert_eq!(value(&first_run, "Power now", "Extra vs night"), "+516 W");
+}
+
+#[test]
+fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivation() {
+    let both = solar_info(&snapshot(|s| {
+        s.home_assistant = Some(HaDiagnostics {
+            connected: true,
+            initialized: true,
+            evidence: "atomic checksum-accepted telegram sequence".into(),
+            entities: vec![],
+            active_power_entity: Some("sensor.sg5_0rs_local_total_active_power".into()),
+            dc_power_entity: Some("sensor.sg5_0rs_local_total_dc_power".into()),
+        });
+        s.inverter.status = InverterStatus::Online;
+        s.inverter.active_power_w = Some(3517.0);
+        s.inverter.pv_power_w = Some(3577.0);
+        s.inverter.household_use_w = None;
+    }));
+    assert_eq!(value(&both, "Power now", "Inverter output (AC)"), "3.5 kW");
+    assert_eq!(value(&both, "Power now", "Solar panels (DC)"), "3.6 kW");
+    assert_eq!(value(&both, "Power now", "Household use"), "Unavailable (AC topology/sign unverified)");
+    assert_eq!(value(&both, "Power now", "Extra vs night"), "Unavailable (AC topology/sign unverified)");
+    assert!(value(&both, "Connections", "Inverter freshness").contains("acquisition timestamp unavailable"));
+    assert!(
+        tooltip(&snapshot(|s| {
+            s.home_assistant = Some(HaDiagnostics {
+                connected: true,
+                initialized: true,
+                evidence: "atomic".into(),
+                entities: vec![],
+                active_power_entity: Some("sensor.ac".into()),
+                dc_power_entity: Some("sensor.dc".into()),
+            });
+            s.inverter.active_power_w = Some(3517.0);
+            s.inverter.pv_power_w = Some(3577.0);
+        }))
+        .contains("| AC 3.5 kW | DC 3.6 kW")
+    );
+
+    let ac_only = solar_info(&snapshot(|s| {
+        s.home_assistant = Some(HaDiagnostics {
+            connected: true,
+            initialized: true,
+            evidence: "atomic".into(),
+            entities: vec![EntityDiagnostic {
+                entity: "sensor.ac".into(),
+                ha_last_changed: None,
+                ha_last_updated: None,
+                ha_last_reported: None,
+                received_age_ms: None,
+                evidence_at: None,
+                age_ms: None,
+                issue: Some("ha-entity-stale".into()),
+                sample_sequence: None,
+                meter_timestamp: None,
+                publisher_received_at: None,
+            }],
+            active_power_entity: Some("sensor.ac".into()),
+            dc_power_entity: None,
+        });
+        s.inverter.status = InverterStatus::Offline;
+        s.inverter.active_power_w = None;
+        s.inverter.pv_power_w = None;
+    }));
+    assert_eq!(value(&ac_only, "Power now", "Inverter output (AC)"), "Unavailable or stale");
+    assert_eq!(value(&ac_only, "Power now", "Solar panels (DC)"), "Not mapped");
 }
 
 #[test]

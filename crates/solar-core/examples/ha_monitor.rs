@@ -2,10 +2,49 @@
 
 use serde_json::json;
 use solar_core::decision::State;
+use solar_core::home_assistant::EntityDiagnostic;
 use solar_core::{SolarConfig, SolarService};
 use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration, Instant};
+
+const AC_ENTITY: &str = "sensor.sg5_0rs_local_total_active_power";
+const DC_ENTITY: &str = "sensor.sg5_0rs_local_total_dc_power";
+
+#[derive(Default)]
+struct InverterPolls {
+    fresh: u64,
+    stale: u64,
+    unavailable: u64,
+    invalid: u64,
+    max_state_change_age_ms: Option<i64>,
+}
+
+impl InverterPolls {
+    fn observe(&mut self, entity: Option<&EntityDiagnostic>) {
+        let Some(entity) = entity else { return };
+        if let Some(age) = entity.age_ms {
+            self.max_state_change_age_ms = Some(self.max_state_change_age_ms.unwrap_or(0).max(age));
+        }
+        match entity.issue.as_deref() {
+            None if entity.age_ms.is_some_and(|age| (0..=90_000).contains(&age)) => self.fresh += 1,
+            Some("ha-entity-stale") => self.stale += 1,
+            Some("ha-entity-unavailable" | "ha-disconnected") | None => self.unavailable += 1,
+            Some(_) => self.invalid += 1,
+        }
+    }
+
+    fn report(&self, mapped: bool) -> serde_json::Value {
+        json!({
+            "mapped": mapped,
+            "fresh_state_change_polls": self.fresh,
+            "stale_polls": self.stale,
+            "unavailable_polls": self.unavailable,
+            "invalid_polls": self.invalid,
+            "maximum_last_known_state_change_age_seconds": self.max_state_change_age_ms.map(|ms| ms as f64 / 1000.0)
+        })
+    }
+}
 
 #[derive(Default)]
 struct Continuity {
@@ -97,12 +136,17 @@ fn main() {
         "homeAssistant": {
             "endpoint": "ws://127.0.0.1:8123/api/websocket",
             "tokenEnv": "SOLAR_HA_TOKEN",
-            "atomicGrid": "sensor.dsmr_atomic_grid_sample"
+            "atomicGrid": "sensor.dsmr_atomic_grid_sample",
+            "activePower": AC_ENTITY,
+            "dcPower": DC_ENTITY,
+            "inverterStaleSeconds": 90
         },
         "decision": {"staleAfterSeconds": 30, "stableDurationSeconds": 300}
     }))
     .expect("fixed monitoring configuration is valid");
     assert!(config.is_ha() && !config.inverter_enabled());
+    let ac_mapped = !config.home_assistant.active_power.is_empty();
+    let dc_mapped = !config.home_assistant.dc_power.is_empty();
     let service = SolarService::start(config.clone());
     let started = Instant::now();
     let mut readings = 0_u64;
@@ -123,10 +167,16 @@ fn main() {
     let mut predicates = BTreeMap::<&str, u64>::new();
     let mut reconnects = 0;
     let mut max_stable_seconds = 0.0_f64;
-    eprintln!("Monitoring HA-only atomic samples for 310 seconds; no device controls.");
+    let mut ac_polls = InverterPolls::default();
+    let mut dc_polls = InverterPolls::default();
+    eprintln!(
+        "Monitoring HA-only atomic grid plus optional AC/DC state-change ages for 310 seconds; no device controls."
+    );
     while started.elapsed() < Duration::from_secs(310) {
         let snapshot = service.snapshot();
         let ha = snapshot.home_assistant.as_ref().expect("HA diagnostics");
+        ac_polls.observe(ha.entities.iter().find(|e| e.entity == AC_ENTITY));
+        dc_polls.observe(ha.entities.iter().find(|e| e.entity == DC_ENTITY));
         initialized |= ha.initialized;
         let code = client_code(snapshot.diagnostics.last_issue.as_deref());
         *issue_observations.entry(code).or_default() += 1;
@@ -234,6 +284,9 @@ fn main() {
             "issue_poll_observations": issue_observations,
             "error_deltas_by_latest_observed_code": error_deltas,
             "error_attribution": "poll-sampled latest client code; intermediate errors can be coalesced or superseded",
+            "optional_inverter_freshness_basis": "last-known HA state-change time plus monotonic receive age; no acquisition timestamp; cached snapshots, last_reported and heartbeats do not renew age",
+            "optional_inverter_ac_observations": ac_polls.report(ac_mapped),
+            "optional_inverter_dc_observations": dc_polls.report(dc_mapped),
             "decision_predicate_poll_observations": predicates,
             "longest_observed_continuous_fresh_seconds": fresh_continuity.longest.as_secs_f64(),
             "longest_observed_continuous_candidate_seconds": candidate_continuity.longest.as_secs_f64(),
@@ -281,5 +334,41 @@ mod tests {
         assert_eq!(client_code(Some("ha-atomic-time")), "ha-atomic-time");
         assert_eq!(client_code(Some("private-token-or-server-message")), "unclassified-client-code");
         assert_eq!(client_code(None), "no-current-issue");
+    }
+
+    #[test]
+    fn optional_inverter_observations_are_aggregated_without_power_or_entity_values() {
+        let mut polls = InverterPolls::default();
+        polls.observe(Some(&EntityDiagnostic {
+            entity: "private-entity-id".into(),
+            ha_last_changed: None,
+            ha_last_updated: None,
+            ha_last_reported: None,
+            received_age_ms: None,
+            evidence_at: None,
+            age_ms: Some(12_000),
+            issue: None,
+            sample_sequence: None,
+            meter_timestamp: None,
+            publisher_received_at: None,
+        }));
+        polls.observe(Some(&EntityDiagnostic {
+            entity: "private-entity-id".into(),
+            ha_last_changed: None,
+            ha_last_updated: None,
+            ha_last_reported: None,
+            received_age_ms: None,
+            evidence_at: None,
+            age_ms: Some(91_000),
+            issue: Some("ha-entity-stale".into()),
+            sample_sequence: None,
+            meter_timestamp: None,
+            publisher_received_at: None,
+        }));
+        let report = polls.report(true).to_string();
+        assert!(report.contains("\"fresh_state_change_polls\":1"));
+        assert!(report.contains("\"stale_polls\":1"));
+        assert!(report.contains("\"maximum_last_known_state_change_age_seconds\":91.0"));
+        assert!(!report.contains("private-entity-id"));
     }
 }

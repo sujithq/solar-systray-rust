@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional Home Assistant inverter AC and DC displays from separate configurable
+  W-valued entities. Each expires independently after 90 seconds using only
+  last-known state-change age; neither can renew grid freshness or derive household use.
 - Isolated native HA monitoring via an existing absolute
   `SOLAR_SYSTRAY_HA_CONFIG` file, with HA-only atomic startup/reload validation,
   no primary settings seeding and no autostart changes.

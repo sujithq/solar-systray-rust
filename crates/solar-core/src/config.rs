@@ -96,7 +96,7 @@ pub fn defaults() -> Value {
             "gridImport": "sensor.electricity_meter_power_consumption",
             "gridExport": "sensor.electricity_meter_power_production",
             "atomicGrid": "",
-            "activePower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5
+            "activePower": "", "dcPower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5
         },
         "decision": {
             "safetyMarginW": 300, "stableDurationSeconds": 300, "staleAfterSeconds": 30,

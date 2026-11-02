@@ -177,12 +177,19 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         vec![row("Grid export", "-- W", Tone::Muted), row("Grid import", "-- W", Tone::Muted)]
     };
     let inverter = &s.inverter;
-    if s.home_assistant.is_some() {
-        match (inverter.status, inverter.active_power_w) {
-            (InverterStatus::Online, Some(ac)) => rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text)),
-            (InverterStatus::Disabled, _) => rows.push(row("Inverter output (AC)", "Not mapped", Tone::Muted)),
-            _ => rows.push(row("Inverter output (AC)", "Unavailable or stale", Tone::Warn)),
-        }
+    if let Some(ha) = &s.home_assistant {
+        let ac = match (ha.active_power_entity.is_some(), inverter.active_power_w) {
+            (_, Some(ac)) => (kilowatts(ac), Tone::Text),
+            (false, None) => ("Not mapped".into(), Tone::Muted),
+            (true, None) => ("Unavailable or stale".into(), Tone::Warn),
+        };
+        rows.push(row("Inverter output (AC)", ac.0, ac.1));
+        let dc = match (ha.dc_power_entity.is_some(), inverter.pv_power_w) {
+            (_, Some(dc)) => (kilowatts(dc), Tone::Text),
+            (false, None) => ("Not mapped".into(), Tone::Muted),
+            (true, None) => ("Unavailable or stale".into(), Tone::Warn),
+        };
+        rows.push(row("Solar panels (DC)", dc.0, dc.1));
         rows.push(row("Household use", "Unavailable (AC topology/sign unverified)", Tone::Muted));
     } else {
         match (inverter.status, inverter.pv_power_w) {
@@ -209,6 +216,9 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
                     let above = js_round(household - baseline) as i64;
                     let value = format!("{}{above} W", if above > 0 { "+" } else { "" });
                     rows.push(row("Extra vs night", value, if above >= 300 { Tone::Warn } else { Tone::Muted }));
+                }
+                None if s.home_assistant.is_some() => {
+                    rows.push(row("Extra vs night", "Unavailable (AC topology/sign unverified)", Tone::Muted))
                 }
                 None => rows.push(row("Extra vs night", "Unavailable (no inverter reading)", Tone::Muted)),
             }
@@ -313,17 +323,21 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
         }
         for entity in &ha.entities {
             let value = entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
-                Some(ms) => format!(
-                    "{} age {:.1}s",
-                    if entity.sample_sequence.is_some() { "Telegram" } else { "HA-change" },
-                    ms as f64 / 1000.0
-                ),
+                Some(ms) if entity.sample_sequence.is_some() => format!("Telegram age {:.1}s", ms as f64 / 1000.0),
+                Some(ms) => format!("Last-known HA state-change age {:.1}s", ms as f64 / 1000.0),
                 None => "Unavailable".into(),
             });
             rows.push(row(&entity.entity, value, if entity.issue.is_some() { Tone::Warn } else { Tone::Muted }));
             if let Some(sequence) = entity.sample_sequence {
                 rows.push(row("Atomic sample sequence", sequence.to_string(), Tone::Muted));
             }
+        }
+        if ha.active_power_entity.is_some() || ha.dc_power_entity.is_some() {
+            rows.push(row(
+                "Inverter freshness",
+                "Last-known HA state-change only; acquisition timestamp unavailable",
+                Tone::Warn,
+            ));
         }
         return rows;
     }
@@ -393,7 +407,14 @@ pub fn tooltip(s: &Snapshot) -> String {
             Some(import) if import > 0.0 => format!("Import {}", watts(import)),
             _ => format!("Export {}", watts(e.surplus_w.unwrap_or(0.0))),
         };
-        if let (InverterStatus::Online, Some(pv)) = (s.inverter.status, s.inverter.pv_power_w) {
+        if s.home_assistant.is_some() {
+            if let Some(ac) = s.inverter.active_power_w {
+                power.push_str(&format!(" | AC {}", kilowatts(ac)));
+            }
+            if let Some(dc) = s.inverter.pv_power_w {
+                power.push_str(&format!(" | DC {}", kilowatts(dc)));
+            }
+        } else if let (InverterStatus::Online, Some(pv)) = (s.inverter.status, s.inverter.pv_power_w) {
             power.push_str(&format!(" | PV {}", kilowatts(pv)));
         }
         lines.push(power);

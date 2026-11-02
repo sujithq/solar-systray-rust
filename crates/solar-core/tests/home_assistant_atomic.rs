@@ -13,6 +13,7 @@ use tungstenite::{Message, WebSocket};
 
 const GRID: &str = "sensor.dsmr_atomic_grid_sample";
 const AC: &str = "sensor.sg5_0rs_local_total_active_power";
+const DC: &str = "sensor.sg5_0rs_local_total_dc_power";
 const AT: i64 = 1_800_000_000_000;
 
 fn iso(at: i64) -> String {
@@ -22,7 +23,7 @@ fn iso(at: i64) -> String {
 fn config() -> SolarConfig {
     SolarConfig::from_json(&json!({
         "energySource":{"type":"home-assistant"},
-        "homeAssistant":{"atomicGrid":GRID,"activePower":AC}
+        "homeAssistant":{"atomicGrid":GRID,"activePower":AC,"dcPower":DC}
     }))
     .unwrap()
 }
@@ -64,7 +65,9 @@ fn atomic_mapping_is_explicit_configurable_and_never_falls_back_to_paired_entiti
         "sensor.electricity_meter_power_consumption",
         "sensor.electricity_meter_power_production",
     ] {
-        assert!(SolarConfig::from_json(&json!({"homeAssistant":{"atomicGrid":bad,"activePower":AC}})).is_err());
+        assert!(
+            SolarConfig::from_json(&json!({"homeAssistant":{"atomicGrid":bad,"activePower":AC,"dcPower":DC}})).is_err()
+        );
     }
     assert!(
         SolarConfig::from_json(&json!({"homeAssistant":{"atomicGrid":"sensor.dsmr_atomic_grid_sample_2"}})).is_ok()
@@ -251,11 +254,20 @@ fn exact_expiry_future_bounds_and_monotonic_silence_are_enforced() {
 }
 
 #[test]
-fn optional_ac_and_unrelated_clocks_never_renew_or_invalidate_atomic_grid() {
+fn optional_ac_dc_and_unrelated_clocks_never_renew_or_invalidate_atomic_grid() {
     let mut state = online();
     state.state(GRID, &sample("synthetic-session-a", 1, AT, 0.0, 3000.0), AT);
     state.state(AC, &json!({"state":"unavailable"}), AT);
+    state.state(
+        DC,
+        &json!({"state":"4200","attributes":{"unit_of_measurement":"W"},
+        "last_changed":iso(AT)}),
+        AT,
+    );
     assert!(state.grid(AT, 30.0).is_some());
+    assert_eq!(state.inverter(AT).active_power_w, None);
+    assert_eq!(state.inverter(AT).pv_power_w, Some(4200.0));
+    assert_eq!(state.grid(AT + 20_000, 30.0).unwrap().timestamp, AT);
     state.state("sensor.electricity_meter_timestamp", &json!({"state":iso(AT+20_000)}), AT + 20_000);
     state.state(
         AC,

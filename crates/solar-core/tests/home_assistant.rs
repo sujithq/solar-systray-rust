@@ -16,12 +16,13 @@ use tungstenite::{Message, WebSocket};
 const IMPORT: &str = "sensor.electricity_meter_power_consumption";
 const EXPORT: &str = "sensor.electricity_meter_power_production";
 const AC: &str = "sensor.sg5_0rs_local_total_active_power";
+const DC: &str = "sensor.sg5_0rs_local_total_dc_power";
 const AT: i64 = 1_800_000_000_000;
 
 fn config() -> SolarConfig {
     SolarConfig::from_json(&json!({
         "energySource":{"type":"home-assistant"},
-        "homeAssistant":{"activePower":AC},
+        "homeAssistant":{"activePower":AC,"dcPower":DC},
         "decision":{"stableDurationSeconds":2}
     }))
     .unwrap()
@@ -63,6 +64,8 @@ fn validates_endpoint_references_entities_and_round_trip() {
         ("gridImport", json!("sensor.bad\nvalue")),
         ("gridImport", json!(EXPORT)),
         ("activePower", json!(IMPORT)),
+        ("dcPower", json!(EXPORT)),
+        ("dcPower", json!("sensor.bad\nvalue")),
         ("gridSkewSeconds", json!(31)),
         ("inverterStaleSeconds", json!(0)),
     ] {
@@ -70,12 +73,17 @@ fn validates_endpoint_references_entities_and_round_trip() {
         let error = SolarConfig::from_json(&v).unwrap_err().to_string();
         assert!(!error.contains("secret"));
     }
+    assert!(
+        SolarConfig::from_json(&json!({"energySource":{"type":"home-assistant"},
+            "homeAssistant":{"activePower":AC,"dcPower":AC}}))
+        .is_err()
+    );
     assert!(SolarConfig::from_json(&json!({"homeAssistant":{"token":"secret"}})).is_err());
     assert!(SolarConfig::default().to_json().get("homeAssistant").is_none(), "legacy JSON remains compatible");
 }
 
 #[test]
-fn normalizes_independent_grid_and_ac_without_dc_or_household_substitution() {
+fn normalizes_independent_grid_ac_and_dc_without_household_substitution() {
     let mut state = online();
     pair(&mut state, AT, "0.1", "2.8");
     let reading = state.grid(AT, 30.0).unwrap();
@@ -85,14 +93,121 @@ fn normalizes_independent_grid_and_ac_without_dc_or_household_substitution() {
     assert!(reading.energy_totals_wh.is_none());
     assert!(reading.meter_time.is_none());
     state.state(AC, &entity(AC, "3200", "W", AT), AT);
+    state.state(DC, &entity(DC, "3600", "W", AT), AT);
     assert_eq!(state.inverter(AT).active_power_w, Some(3200.0));
-    assert_eq!(state.inverter(AT).pv_power_w, None);
+    assert_eq!(state.inverter(AT).pv_power_w, Some(3600.0));
     assert_eq!(state.inverter(AT).household_use_w, None);
     assert_eq!(state.inverter(AT + 90_000).active_power_w, Some(3200.0));
     assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
     state.state(AC, &entity(AC, "unavailable", "W", AT), AT);
     assert!(state.grid(AT, 30.0).is_some(), "optional AC cannot invalidate grid");
-    assert!(state.diagnostics(AT, 30.0).entities[2].issue.is_some());
+    assert!(state.inverter(AT).active_power_w.is_none());
+    assert_eq!(state.inverter(AT).pv_power_w, Some(3600.0), "invalid AC cannot invalidate DC");
+    let diagnostics = state.diagnostics(AT, 30.0);
+    assert_eq!(diagnostics.entities[2].entity, AC);
+    assert!(diagnostics.entities[2].issue.is_some());
+    assert_eq!(diagnostics.entities[3].entity, DC);
+    assert!(diagnostics.entities[3].issue.is_none());
+}
+
+#[test]
+fn ac_and_dc_updates_expire_independently_and_never_renew_atomic_grid() {
+    let config = SolarConfig::from_json(&json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"atomicGrid":"sensor.dsmr_atomic_grid_sample","activePower":AC,"dcPower":DC}
+    }))
+    .unwrap();
+    assert_eq!(config.home_assistant.inverter_stale_seconds, 90.0);
+    let mut state = HaState::new(config.home_assistant.clone());
+    state.connected();
+    state.ready();
+    let grid = json!({"entity_id":"sensor.dsmr_atomic_grid_sample","state":"1",
+        "attributes":{"schema_version":1,"session":"atomic","sample_sequence":1,
+        "meter_timestamp":chrono::DateTime::from_timestamp_millis(AT).unwrap().to_rfc3339(),
+        "received_at":chrono::DateTime::from_timestamp_millis(AT).unwrap().to_rfc3339(),
+        "import_w":0,"export_w":0}});
+    state.state("sensor.dsmr_atomic_grid_sample", &grid, AT);
+    state.state(AC, &entity(AC, "3200", "W", AT), AT);
+    state.state(DC, &entity(DC, "3600", "W", AT + 20_000), AT + 20_000);
+    assert!(state.relevant(AC) && state.relevant(DC));
+    assert_eq!(
+        state.grid(AT + 20_000, 30.0).map(|r| r.timestamp),
+        Some(AT),
+        "{:?}",
+        state.diagnostics(AT + 20_000, 30.0)
+    );
+    assert_eq!(state.inverter(AT + 90_000).active_power_w, Some(3200.0));
+    assert_eq!(state.inverter(AT + 90_000).pv_power_w, Some(3600.0));
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).pv_power_w, Some(3600.0), "DC age is independent");
+    assert!(state.grid(AT + 90_001, 30.0).is_none(), "inverter samples cannot renew atomic grid freshness");
+    assert_eq!(state.inverter(AT + 110_001).pv_power_w, None);
+    assert!(state.grid(AT + 110_001, 30.0).is_none());
+}
+
+#[test]
+fn malformed_or_unavailable_optional_inverter_only_disables_its_display() {
+    let mut state = online();
+    pair(&mut state, AT, "0", "1.5");
+    state.state(AC, &entity(AC, "2500", "W", AT), AT);
+    let valid_grid = state.grid(AT, 30.0).unwrap().timestamp;
+    for (watts, unit) in [("NaN", "W"), ("inf", "W"), ("-1", "W"), ("1000001", "W"), ("2500", "kW"), ("unknown", "W")] {
+        state.state(DC, &entity(DC, watts, unit, AT), AT);
+        assert_eq!(state.inverter(AT).active_power_w, Some(2500.0));
+        assert_eq!(state.inverter(AT).pv_power_w, None, "{watts} {unit}");
+        assert_eq!(state.grid(AT, 30.0).unwrap().timestamp, valid_grid);
+    }
+    state.state(DC, &entity(DC, "3600", "W", AT), AT);
+    assert_eq!(state.inverter(AT).pv_power_w, Some(3600.0));
+    state.state(DC, &Value::Null, AT);
+    assert_eq!(state.inverter(AT).active_power_w, Some(2500.0));
+    assert_eq!(state.inverter(AT).pv_power_w, None);
+    assert_eq!(state.grid(AT, 30.0).unwrap().timestamp, valid_grid);
+    state.state(DC, &entity(DC, "3600", "W", AT), AT);
+    state.state(AC, &entity(AC, "-2500", "W", AT + 1), AT + 1);
+    assert_eq!(state.inverter(AT + 1).active_power_w, Some(-2500.0), "signed AC is preserved without abs()");
+    assert_eq!(state.inverter(AT + 1).pv_power_w, Some(3600.0));
+    assert_eq!(state.grid(AT + 1, 30.0).unwrap().timestamp, valid_grid);
+    for (i, (watts, unit)) in [("-1000001", "W"), ("NaN", "W"), ("2500", "kW")].into_iter().enumerate() {
+        let at = AT + 2 + i as i64;
+        state.state(AC, &entity(AC, watts, unit, at), at);
+        assert_eq!(state.inverter(at).active_power_w, None, "{watts} {unit}");
+        assert_eq!(state.inverter(at).pv_power_w, Some(3600.0));
+        assert_eq!(state.grid(at, 30.0).unwrap().timestamp, valid_grid);
+    }
+    assert_eq!(state.stats.errors, 0, "optional inverter failures do not count as grid/client failures");
+}
+
+#[test]
+fn cached_inverter_snapshots_after_reconnect_do_not_renew_last_state_change_age() {
+    let mut state = online();
+    pair(&mut state, AT, "0", "1.5");
+    state.state(AC, &entity(AC, "2500", "W", AT), AT);
+    state.state(DC, &entity(DC, "3600", "W", AT), AT);
+    assert_eq!(state.inverter(AT + 89_000).active_power_w, Some(2500.0));
+    state.disconnect("ha-read-or-protocol");
+    state.connected();
+    state.ready();
+    state.snapshot_state(AC, &entity(AC, "2500", "W", AT), AT + 89_000);
+    state.snapshot_state(DC, &entity(DC, "3600", "W", AT), AT + 89_000);
+    assert_eq!(state.inverter(AT + 89_000).pv_power_w, Some(3600.0));
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).pv_power_w, None);
+}
+
+#[test]
+fn repeated_inverter_state_and_last_reported_do_not_renew_freshness() {
+    let mut state = online();
+    state.state(AC, &entity(AC, "2500", "W", AT), AT);
+    state.state(DC, &entity(DC, "3600", "W", AT), AT);
+    let mut repeated_ac = entity(AC, "2500", "W", AT);
+    repeated_ac["last_updated"] = json!(chrono::DateTime::from_timestamp_millis(AT + 60_000).unwrap().to_rfc3339());
+    repeated_ac["last_reported"] = repeated_ac["last_updated"].clone();
+    state.state(AC, &repeated_ac, AT + 60_000);
+    state.state(DC, &entity(DC, "3600", "W", AT + 60_000), AT + 60_000);
+    assert_eq!(state.inverter(AT + 89_000).active_power_w, Some(2500.0));
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 89_000).pv_power_w, Some(3600.0));
 }
 
 #[test]
