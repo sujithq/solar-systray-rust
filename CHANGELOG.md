@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without an automatic timeout; the tray stays running until Quit independently
   of the existing bounded smoke workflow.
 
+### Changed
+
+- HA AC/DC values now show initial and unchanged reported readings with HA
+  update age and an acquisition-freshness-unverified caveat. Stale/disconnected
+  cached values remain labeled; household use is advisory and still requires
+  valid AC age/skew plus fresh atomic grid. No change to grid/GO or history rules.
+
 ### Fixed
 
 - Advisory HA reported night estimates now accept at least 95% fully available

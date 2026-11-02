@@ -17,14 +17,14 @@ struct InverterPolls {
     stale: u64,
     unavailable: u64,
     invalid: u64,
-    max_state_change_age_ms: Option<i64>,
+    max_update_age_ms: Option<i64>,
 }
 
 impl InverterPolls {
     fn observe(&mut self, entity: Option<&EntityDiagnostic>) {
         let Some(entity) = entity else { return };
         if let Some(age) = entity.age_ms {
-            self.max_state_change_age_ms = Some(self.max_state_change_age_ms.unwrap_or(0).max(age));
+            self.max_update_age_ms = Some(self.max_update_age_ms.unwrap_or(0).max(age));
         }
         match entity.issue.as_deref() {
             None if entity.age_ms.is_some_and(|age| (0..=90_000).contains(&age)) => self.fresh += 1,
@@ -37,11 +37,11 @@ impl InverterPolls {
     fn report(&self, mapped: bool) -> serde_json::Value {
         json!({
             "mapped": mapped,
-            "fresh_state_change_polls": self.fresh,
+            "recent_ha_update_polls": self.fresh,
             "stale_polls": self.stale,
             "unavailable_polls": self.unavailable,
             "invalid_polls": self.invalid,
-            "maximum_last_known_state_change_age_seconds": self.max_state_change_age_ms.map(|ms| ms as f64 / 1000.0)
+            "maximum_ha_update_age_seconds": self.max_update_age_ms.map(|ms| ms as f64 / 1000.0)
         })
     }
 }
@@ -170,7 +170,7 @@ fn main() {
     let mut ac_polls = InverterPolls::default();
     let mut dc_polls = InverterPolls::default();
     eprintln!(
-        "Monitoring HA-only atomic grid plus optional AC/DC state-change ages for 310 seconds; no device controls."
+        "Monitoring HA-only atomic grid plus optional reported AC/DC update ages for 310 seconds; no device controls."
     );
     while started.elapsed() < Duration::from_secs(310) {
         let snapshot = service.snapshot();
@@ -284,7 +284,7 @@ fn main() {
             "issue_poll_observations": issue_observations,
             "error_deltas_by_latest_observed_code": error_deltas,
             "error_attribution": "poll-sampled latest client code; intermediate errors can be coalesced or superseded",
-            "optional_inverter_freshness_basis": "last-known HA state-change time plus monotonic receive age; no acquisition timestamp; cached snapshots, last_reported and heartbeats do not renew age",
+            "optional_inverter_freshness_basis": "HA last_updated plus monotonic aging, reported values only; physical acquisition freshness unverified; cached snapshots, last_reported and heartbeats never replace the source timestamp",
             "optional_inverter_ac_observations": ac_polls.report(ac_mapped),
             "optional_inverter_dc_observations": dc_polls.report(dc_mapped),
             "decision_predicate_poll_observations": predicates,

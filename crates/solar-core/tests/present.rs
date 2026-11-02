@@ -283,8 +283,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
         s.inverter.pv_power_w = Some(3577.0);
         s.inverter.household_use_w = None;
     }));
-    assert_eq!(value(&both, "Power now", "Inverter output (AC)"), "3.5 kW");
-    assert_eq!(value(&both, "Power now", "Solar panels (DC)"), "3.6 kW");
+    assert_eq!(value(&both, "Power now", "Inverter output (AC)"), "3.5 kW (HA reported; update age unknown)");
+    assert_eq!(value(&both, "Power now", "Solar panels (DC)"), "3.6 kW (HA reported; update age unknown)");
     assert_eq!(value(&both, "Power now", "Household use"), "Unavailable (disabled by configuration)");
     assert_eq!(value(&both, "Power now", "Extra vs night"), "Unavailable (disabled by configuration)");
     assert!(value(&both, "Connections", "Inverter freshness").contains("acquisition timestamp unavailable"));
@@ -306,7 +306,7 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
             s.inverter.active_power_w = Some(3517.0);
             s.inverter.pv_power_w = Some(3577.0);
         }))
-        .contains("| AC 3.5 kW | DC 3.6 kW")
+        .contains("| AC reported 3.5 kW (unverified) | DC reported 3.6 kW (unverified)")
     );
 
     let ac_only = solar_info(&snapshot(|s| {
@@ -338,7 +338,7 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
         s.inverter.active_power_w = None;
         s.inverter.pv_power_w = None;
     }));
-    assert_eq!(value(&ac_only, "Power now", "Inverter output (AC)"), "Unavailable or stale");
+    assert_eq!(value(&ac_only, "Power now", "Inverter output (AC)"), "Unavailable (HA reported)");
     assert_eq!(value(&ac_only, "Power now", "Solar panels (DC)"), "Not mapped");
 }
 

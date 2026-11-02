@@ -196,7 +196,8 @@ fn normalizes_independent_grid_ac_and_dc_without_household_substitution() {
     assert_eq!(state.inverter(AT).pv_power_w, Some(3600.0));
     assert_eq!(state.inverter(AT).household_use_w, None);
     assert_eq!(state.inverter(AT + 90_000).active_power_w, Some(3200.0));
-    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, Some(3200.0), "stale report remains visible");
+    assert_eq!(state.inverter(AT + 90_001).issue.as_deref(), Some("ha-inverter-reported-stale"));
     state.state(AC, &entity(AC, "unavailable", "W", AT), AT);
     assert!(state.grid(AT, 30.0).is_some(), "optional AC cannot invalidate grid");
     assert!(state.inverter(AT).active_power_w.is_none());
@@ -276,8 +277,8 @@ fn household_use_fails_closed_on_missing_ac_skew_staleness_and_reconnect_snapsho
     let reading = state.grid(AT + 8_000, 30.0).unwrap();
     assert_eq!(
         state.household_use(Some(&reading), AT + 8_000, 30.0),
-        Err("ha-household-awaiting-live-ac"),
-        "snapshot AC may not restore derived household use after reconnect"
+        Ok(1_400.0),
+        "snapshot AC supports advisory use under its original source age/skew, never receipt age"
     );
 
     state.state(AC, &entity(AC, "700", "W", AT + 8_000), AT + 8_000);
@@ -334,10 +335,14 @@ fn ac_and_dc_updates_expire_independently_and_never_renew_atomic_grid() {
     );
     assert_eq!(state.inverter(AT + 90_000).active_power_w, Some(3200.0));
     assert_eq!(state.inverter(AT + 90_000).pv_power_w, Some(3600.0));
-    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, Some(3200.0));
+    let diagnostics = state.diagnostics(AT + 90_001, 30.0);
+    assert_eq!(diagnostics.entities[1].issue.as_deref(), Some("ha-entity-stale"));
+    assert!(diagnostics.entities[2].issue.is_none(), "DC source age is independent");
     assert_eq!(state.inverter(AT + 90_001).pv_power_w, Some(3600.0), "DC age is independent");
     assert!(state.grid(AT + 90_001, 30.0).is_none(), "inverter samples cannot renew atomic grid freshness");
-    assert_eq!(state.inverter(AT + 110_001).pv_power_w, None);
+    assert_eq!(state.inverter(AT + 110_001).pv_power_w, Some(3600.0));
+    assert_eq!(state.diagnostics(AT + 110_001, 30.0).entities[2].issue.as_deref(), Some("ha-entity-stale"));
     assert!(state.grid(AT + 110_001, 30.0).is_none());
 }
 
@@ -375,7 +380,7 @@ fn malformed_or_unavailable_optional_inverter_only_disables_its_display() {
 }
 
 #[test]
-fn cached_inverter_snapshots_after_reconnect_do_not_renew_last_state_change_age() {
+fn cached_inverter_snapshots_after_reconnect_do_not_renew_reported_update_age() {
     let mut state = online();
     pair(&mut state, AT, "0", "1.5");
     state.state(AC, &entity(AC, "2500", "W", AT), AT);
@@ -387,12 +392,17 @@ fn cached_inverter_snapshots_after_reconnect_do_not_renew_last_state_change_age(
     state.snapshot_state(AC, &entity(AC, "2500", "W", AT), AT + 89_000);
     state.snapshot_state(DC, &entity(DC, "3600", "W", AT), AT + 89_000);
     assert_eq!(state.inverter(AT + 89_000).pv_power_w, Some(3600.0));
-    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
-    assert_eq!(state.inverter(AT + 90_001).pv_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, Some(2500.0));
+    assert_eq!(state.inverter(AT + 90_001).pv_power_w, Some(3600.0));
+    for diagnostic in &state.diagnostics(AT + 90_001, 30.0).entities[2..] {
+        assert_eq!(diagnostic.age_ms, Some(90_001));
+        assert_eq!(diagnostic.issue.as_deref(), Some("ha-entity-stale"));
+        assert_eq!(diagnostic.evidence_at, None, "reported time is not physical acquisition evidence");
+    }
 }
 
 #[test]
-fn repeated_inverter_state_and_last_reported_do_not_renew_freshness() {
+fn inverter_last_updated_advances_reported_age_without_claiming_physical_freshness() {
     let mut state = online();
     state.state(AC, &entity(AC, "2500", "W", AT), AT);
     state.state(DC, &entity(DC, "3600", "W", AT), AT);
@@ -402,8 +412,147 @@ fn repeated_inverter_state_and_last_reported_do_not_renew_freshness() {
     state.state(AC, &repeated_ac, AT + 60_000);
     state.state(DC, &entity(DC, "3600", "W", AT + 60_000), AT + 60_000);
     assert_eq!(state.inverter(AT + 89_000).active_power_w, Some(2500.0));
-    assert_eq!(state.inverter(AT + 90_001).active_power_w, None);
+    assert_eq!(state.inverter(AT + 90_001).active_power_w, Some(2500.0));
     assert_eq!(state.inverter(AT + 89_000).pv_power_w, Some(3600.0));
+    let diagnostics = state.diagnostics(AT + 90_001, 30.0);
+    assert_eq!(diagnostics.entities[2].age_ms, Some(30_001));
+    assert_eq!(diagnostics.entities[2].ha_last_changed, Some(AT));
+    assert_eq!(diagnostics.entities[2].ha_last_updated, Some(AT + 60_000));
+    assert_eq!(diagnostics.entities[2].evidence_at, None);
+    assert!(diagnostics.entities[2].issue.is_none());
+    repeated_ac["last_reported"] = json!(chrono::DateTime::from_timestamp_millis(AT + 180_000).unwrap().to_rfc3339());
+    state.state(AC, &repeated_ac, AT + 180_000);
+    assert_eq!(state.diagnostics(AT + 180_000, 30.0).entities[2].age_ms, Some(120_000));
+    assert_eq!(state.diagnostics(AT + 180_000, 30.0).entities[2].issue.as_deref(), Some("ha-entity-stale"));
+}
+
+#[test]
+fn initial_static_zero_is_reported_with_its_source_age_and_advisory_gates() {
+    let mut runtime = Runtime::new(household_config(1, 30.0));
+    runtime.ha_connected();
+    let mut zero = entity(AC, "0", "W", AT - 86_400_000);
+    zero["last_updated"] = json!(chrono::DateTime::from_timestamp_millis(AT).unwrap().to_rfc3339());
+    runtime.ha_snapshot_state(AC, &zero, AT);
+    runtime.ha_ready();
+    let snapshot = runtime.snapshot(AT);
+    assert_eq!(snapshot.inverter.active_power_w, Some(0.0), "initial zero needs no numerical change");
+    assert!(snapshot.inverter.household_use_w.is_none(), "AC cannot establish an atomic grid sample");
+    assert!(!snapshot.evaluation.safe_to_start);
+    runtime.ha_state("sensor.dsmr_atomic_grid_sample", &atomic_sample(1, AT, AT, 200, 0), AT);
+    let snapshot = runtime.snapshot(AT);
+    assert_eq!(snapshot.inverter.household_use_w, Some(200.0), "fresh HA update supports advisory use only");
+    let info = solar_info(&snapshot);
+    assert_eq!(
+        info.section("Power now").unwrap().value("Inverter output (AC)"),
+        Some("0.0 kW (HA reported; update age 0.0s)")
+    );
+    assert!(info.section("Power now").unwrap().value("Inverter evidence").unwrap().contains("unverified"));
+
+    runtime.ha_state(
+        "sensor.dsmr_atomic_grid_sample",
+        &atomic_sample(2, AT + 30_000, AT + 30_000, 200, 0),
+        AT + 30_000,
+    );
+    assert_eq!(runtime.snapshot(AT + 30_000).inverter.household_use_w, Some(200.0), "exact 30s skew is eligible");
+    runtime.ha_state(
+        "sensor.dsmr_atomic_grid_sample",
+        &atomic_sample(3, AT + 30_001, AT + 30_001, 200, 0),
+        AT + 30_001,
+    );
+    let snapshot = runtime.snapshot(AT + 30_001);
+    assert!(snapshot.inverter.household_use_w.is_none());
+    assert_eq!(snapshot.home_assistant.unwrap().household_use_issue.as_deref(), Some("ha-household-event-skew"));
+
+    runtime.ha_state(
+        "sensor.dsmr_atomic_grid_sample",
+        &atomic_sample(4, AT + 90_001, AT + 90_001, 200, 0),
+        AT + 90_001,
+    );
+    runtime.ha_state(AC, &zero, AT + 90_001);
+    let snapshot = runtime.snapshot(AT + 90_001);
+    assert_eq!(snapshot.inverter.active_power_w, Some(0.0));
+    assert!(snapshot.inverter.household_use_w.is_none());
+    let info = solar_info(&snapshot);
+    assert_eq!(
+        info.section("Power now").unwrap().value("Inverter output (AC)"),
+        Some("0.0 kW (HA reported; update age 90.0s; stale)")
+    );
+
+    zero["last_updated"] = json!(chrono::DateTime::from_timestamp_millis(AT + 90_001).unwrap().to_rfc3339());
+    zero["last_reported"] = zero["last_updated"].clone();
+    runtime.ha_state(AC, &zero, AT + 90_001);
+    let snapshot = runtime.snapshot(AT + 90_001);
+    assert_eq!(snapshot.inverter.household_use_w, Some(200.0), "unchanged value with a new HA update is advisory");
+    assert_eq!(snapshot.home_assistant.unwrap().entities[1].ha_last_changed, Some(AT - 86_400_000));
+}
+
+#[test]
+fn reported_values_disconnect_reconnect_stale_snapshot_and_invalid_update_lifecycle() {
+    let mut runtime = Runtime::new(household_config(1, 30.0));
+    runtime.ha_connected();
+    runtime.ha_ready();
+    runtime.ha_state("sensor.dsmr_atomic_grid_sample", &atomic_sample(1, AT, AT, 200, 0), AT);
+    runtime.ha_snapshot_state(AC, &entity(AC, "500", "W", AT), AT);
+    assert_eq!(runtime.snapshot(AT).inverter.household_use_w, Some(700.0));
+    runtime.ha_disconnect("ha-closed");
+    let snapshot = runtime.snapshot(AT + 1_000);
+    assert_eq!(snapshot.inverter.active_power_w, Some(500.0), "disconnected cached value is visible, not active");
+    assert!(snapshot.inverter.household_use_w.is_none());
+    assert!(!snapshot.evaluation.safe_to_start);
+    assert_eq!(snapshot.inverter.issue.as_deref(), Some("ha-inverter-reported-disconnected"));
+    let info = solar_info(&snapshot);
+    assert_eq!(
+        info.section("Power now").unwrap().value("Inverter output (AC)"),
+        Some("0.5 kW (HA reported; update age 1.0s; disconnected cached)")
+    );
+    runtime.ha_connected();
+    runtime.ha_snapshot_state(AC, &entity(AC, "500", "W", AT), AT + 120_000);
+    runtime.ha_ready();
+    runtime.ha_state(
+        "sensor.dsmr_atomic_grid_sample",
+        &atomic_sample(2, AT + 120_000, AT + 120_000, 200, 0),
+        AT + 120_000,
+    );
+    let snapshot = runtime.snapshot(AT + 120_000);
+    assert!(snapshot.inverter.household_use_w.is_none());
+    assert_eq!(snapshot.home_assistant.unwrap().entities[1].age_ms, Some(120_000));
+    for (offset, state) in [(1, "unknown"), (2, "unavailable"), (3, "NaN")] {
+        let at = AT + 120_000 + offset;
+        runtime.ha_state(AC, &entity(AC, state, "W", at), at);
+        let snapshot = runtime.snapshot(at);
+        assert_eq!(snapshot.inverter.active_power_w, None);
+        assert_eq!(snapshot.inverter.household_use_w, None);
+    }
+    let now = AT + 121_000;
+    runtime.ha_state(AC, &entity(AC, "500", "W", now), now);
+    assert_eq!(runtime.snapshot(now).inverter.household_use_w, Some(700.0));
+}
+
+#[test]
+fn reported_inverter_requires_valid_ordered_update_time_and_keeps_optional_failures_isolated() {
+    let mut state = online();
+    pair(&mut state, AT, "0", "1.5");
+    state.state(DC, &entity(DC, "0", "W", AT), AT);
+    for updated in [
+        Value::Null,
+        json!("bad"),
+        json!(chrono::DateTime::from_timestamp_millis(AT + 1).unwrap().to_rfc3339()),
+        json!(chrono::DateTime::from_timestamp_millis(AT - 1).unwrap().to_rfc3339()),
+    ] {
+        let mut ac = entity(AC, "0", "W", AT);
+        ac["last_updated"] = updated;
+        state.snapshot_state(AC, &ac, AT);
+        assert_eq!(state.inverter(AT).active_power_w, None);
+        assert_eq!(state.inverter(AT).pv_power_w, Some(0.0));
+        assert!(state.grid(AT, 30.0).is_some());
+        assert_eq!(state.diagnostics(AT, 30.0).entities[2].issue.as_deref(), Some("ha-timestamp"));
+    }
+    state.snapshot_state(AC, &entity(AC, "500", "W", AT + 2_000), AT + 2_000);
+    state.state(AC, &entity(AC, "600", "W", AT + 1_000), AT + 2_000);
+    assert_eq!(state.inverter(AT + 2_000).active_power_w, None);
+    assert_eq!(state.diagnostics(AT + 2_000, 30.0).entities[2].issue.as_deref(), Some("ha-out-of-order"));
+    state.state(AC, &entity(AC, "500", "W", AT + 3_000), AT + 3_000);
+    assert_eq!(state.diagnostics(AT + 3_000, 30.0).entities[2].age_ms, Some(0));
 }
 
 #[test]
@@ -532,7 +681,10 @@ fn runtime_gates_partial_features_and_observes_transient_imports_between_ui_tick
     runtime.ha_state(AC, &entity(AC, "3200", "W", AT + 3000), AT + 3000);
     let snapshot = runtime.snapshot(AT + 3000);
     assert!(snapshot.inverter.household_use_w.is_none());
-    assert_eq!(solar_info(&snapshot).section("Power now").unwrap().value("Inverter output (AC)"), Some("3.2 kW"));
+    assert_eq!(
+        solar_info(&snapshot).section("Power now").unwrap().value("Inverter output (AC)"),
+        Some("3.2 kW (HA reported; update age 0.0s)")
+    );
     assert!(solar_info(&snapshot).section("Power now").unwrap().value("Solar panels (PV)").is_none());
 }
 
@@ -546,7 +698,7 @@ fn runtime_displays_household_use_only_after_explicit_gates_pass() {
     let snapshot = runtime.snapshot(AT + 1_000);
     assert_eq!(snapshot.inverter.household_use_w, Some(1_300.0));
     let info = solar_info(&snapshot);
-    assert_eq!(info.section("Power now").unwrap().value("Household use"), Some("1.3 kW"));
+    assert_eq!(info.section("Power now").unwrap().value("Household use"), Some("1.3 kW (advisory)"));
     assert!(
         info.section("Connections")
             .unwrap()
@@ -576,7 +728,7 @@ fn stale_optional_ac_does_not_prevent_atomic_grid_from_earning_go() {
         }
         if second == 301 {
             assert!(snapshot.evaluation.safe_to_start, "grid-only GO must remain available after AC expiry");
-            assert!(snapshot.inverter.household_use_w.is_none(), "AC state-change evidence expired after 90s");
+            assert!(snapshot.inverter.household_use_w.is_none(), "AC reported-update age expired after 90s");
             assert_eq!(
                 snapshot.home_assistant.as_ref().unwrap().household_use_issue.as_deref(),
                 Some("ha-household-ac-stale")
@@ -785,10 +937,18 @@ fn websocket_worker_round_trip_and_failures() {
             let now = solar_core::now_ms();
             // This older buffered event must not replace the newer snapshot.
             event(&mut ws, EXPORT, entity(EXPORT, "2.5", "kW", now - 2000));
+            let mut older_ac = entity(AC, "400", "W", now - 86_400_000);
+            older_ac["last_updated"] = json!(chrono::DateTime::from_timestamp_millis(now - 2000).unwrap().to_rfc3339());
+            older_ac["last_reported"] = older_ac["last_updated"].clone();
+            event(&mut ws, AC, older_ac);
+            let mut snapshot_ac = entity(AC, "500", "W", now - 86_400_000);
+            snapshot_ac["last_updated"] =
+                json!(chrono::DateTime::from_timestamp_millis(now - 1000).unwrap().to_rfc3339());
+            snapshot_ac["last_reported"] = snapshot_ac["last_updated"].clone();
             write(
                 &mut ws,
                 json!({"id":2,"type":"result","success":true,"result":[
-                entity(IMPORT,"0.001","kW",now-1000),entity(EXPORT,"2.6","kW",now-1000)]}),
+                entity(IMPORT,"0.001","kW",now-1000),entity(EXPORT,"2.6","kW",now-1000),snapshot_ac]}),
             );
             released.recv_timeout(Duration::from_secs(5)).unwrap();
             event(&mut ws, IMPORT, entity(IMPORT, "0", "kW", now - 500));
@@ -825,9 +985,11 @@ fn websocket_worker_round_trip_and_failures() {
         let cfg = SolarConfig::from_json(&json!({
             "energySource":{"type":"home-assistant","host":"127.0.0.1","port":device_port},
             "inverterSource":{"host":"127.0.0.1","port":device_port},
-            "homeAssistant":{"endpoint":format!("ws://127.0.0.1:{port}/api/websocket"),"tokenEnv":"SOLAR_HA_FIXTURE_TOKEN"},
+            "homeAssistant":{"endpoint":format!("ws://127.0.0.1:{port}/api/websocket"),
+                "tokenEnv":"SOLAR_HA_FIXTURE_TOKEN","activePower":AC,"dcPower":DC},
             "decision":{"stableDurationSeconds":0}
-        })).unwrap();
+        }))
+        .unwrap();
         let service = SolarService::start(cfg);
         if scenario == "trickle-stop" {
             signalled.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -835,6 +997,11 @@ fn websocket_worker_round_trip_and_failures() {
         } else if scenario == "live" || scenario == "reconnect" {
             let s = wait(&service, |s| s.home_assistant.as_ref().is_some_and(|h| h.initialized));
             assert!(!s.evaluation.safe_to_start, "snapshot cannot enable a decision");
+            assert_eq!(
+                s.inverter.active_power_w,
+                Some(500.0),
+                "buffer ordering uses AC last_updated, not last_changed"
+            );
             release.send(()).unwrap();
             let s = wait(&service, |s| s.evaluation.surplus_w == Some(2700.0));
             let at = s.reading_at;
@@ -851,6 +1018,7 @@ fn websocket_worker_round_trip_and_failures() {
                     s.diagnostics.reconnects > 0 && s.home_assistant.as_ref().is_some_and(|h| h.initialized)
                 });
                 assert!(!s.evaluation.safe_to_start, "reconnect snapshot cannot restore GO");
+                assert_eq!(s.inverter.active_power_w, None, "absent optional entity clears disconnected cache");
                 release.send(()).unwrap();
                 wait(&service, |s| s.evaluation.surplus_w == Some(2900.0));
                 release.send(()).unwrap();

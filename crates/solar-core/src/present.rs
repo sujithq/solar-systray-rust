@@ -198,6 +198,36 @@ pub fn headline(s: &Snapshot) -> Headline {
     make("NO SURPLUS".into(), need, Tone::Muted)
 }
 
+fn reported_inverter_status<'a>(ha: &'a crate::home_assistant::HaDiagnostics, id: &str) -> Option<&'a str> {
+    if !ha.connected {
+        Some("disconnected")
+    } else if !ha.initialized {
+        Some("initializing")
+    } else {
+        ha.entities.iter().find(|entity| entity.entity == id).and_then(|entity| entity.issue.as_deref())
+    }
+}
+
+fn reported_inverter_row(
+    ha: &crate::home_assistant::HaDiagnostics,
+    id: Option<&str>,
+    value: Option<f64>,
+) -> (String, Tone) {
+    let Some(id) = id else { return ("Not mapped".into(), Tone::Muted) };
+    let Some(value) = value else { return ("Unavailable (HA reported)".into(), Tone::Warn) };
+    let age = ha.entities.iter().find(|entity| entity.entity == id).and_then(|entity| entity.age_ms);
+    let age = age.map_or_else(|| "update age unknown".into(), |ms| format!("update age {:.1}s", ms as f64 / 1000.0));
+    let status = reported_inverter_status(ha, id);
+    let marker = match status {
+        Some("ha-entity-stale") => "; stale",
+        Some("disconnected") => "; disconnected cached",
+        Some("initializing") => "; initializing cached",
+        Some(_) => "; invalid/unavailable",
+        None => "",
+    };
+    (format!("{} (HA reported; {age}{marker})", kilowatts(value)), Tone::Warn)
+}
+
 fn power_rows(s: &Snapshot) -> Vec<Row> {
     let e = &s.evaluation;
     let mut rows = if live(s) {
@@ -211,25 +241,20 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
     let inverter = &s.inverter;
     let household = inverter.household_use_w.filter(|w| w.is_finite());
     if let Some(ha) = &s.home_assistant {
-        let ac = match (ha.active_power_entity.is_some(), inverter.active_power_w) {
-            (_, Some(ac)) => (kilowatts(ac), Tone::Text),
-            (false, None) => ("Not mapped".into(), Tone::Muted),
-            (true, None) => ("Unavailable or stale".into(), Tone::Warn),
-        };
+        let ac = reported_inverter_row(ha, ha.active_power_entity.as_deref(), inverter.active_power_w);
         rows.push(row("Inverter output (AC)", ac.0, ac.1));
-        let dc = match (ha.dc_power_entity.is_some(), inverter.pv_power_w) {
-            (_, Some(dc)) => (kilowatts(dc), Tone::Text),
-            (false, None) => ("Not mapped".into(), Tone::Muted),
-            (true, None) => ("Unavailable or stale".into(), Tone::Warn),
-        };
+        let dc = reported_inverter_row(ha, ha.dc_power_entity.as_deref(), inverter.pv_power_w);
         rows.push(row("Solar panels (DC)", dc.0, dc.1));
+        if ha.active_power_entity.is_some() || ha.dc_power_entity.is_some() {
+            rows.push(row("Inverter evidence", "HA reported; acquisition freshness unverified", Tone::Warn));
+        }
         let household_row = household.map_or_else(
             || {
                 let issue = ha.household_use_issue.as_deref();
                 let tone = if issue == Some("ha-household-disabled") { Tone::Muted } else { Tone::Warn };
                 (household_unavailable(issue).to_string(), tone)
             },
-            |watts| (kilowatts(watts), Tone::Text),
+            |watts| (format!("{} (advisory)", kilowatts(watts)), Tone::Warn),
         );
         rows.push(row("Household use", household_row.0, household_row.1));
     } else {
@@ -375,8 +400,7 @@ fn household_unavailable(issue: Option<&str>) -> &'static str {
     match issue {
         Some("ha-household-disabled") => "Unavailable (disabled by configuration)",
         Some("ha-household-event-skew") => "Unavailable (HA event proximity gate)",
-        Some("ha-household-ac-stale") => "Unavailable (AC last-known state is stale)",
-        Some("ha-household-awaiting-live-ac") => "Unavailable (awaiting live AC value change)",
+        Some("ha-household-ac-stale") => "Unavailable (AC HA update is stale)",
         Some("ha-household-out-of-range") => "Unavailable (derived value out of range)",
         Some("ha-household-topology" | "ha-household-mapping") => "Unavailable (topology/sign configuration required)",
         Some("ha-household-disconnected" | "ha-household-grid-unavailable" | "ha-household-ac-unavailable") => {
@@ -617,11 +641,21 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
             rows.push(row("Daily energy data", issue, Tone::Warn));
         }
         for entity in &ha.entities {
-            let value = entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
-                Some(ms) if entity.sample_sequence.is_some() => format!("Telegram age {:.1}s", ms as f64 / 1000.0),
-                Some(ms) => format!("Last-known HA state-change age {:.1}s", ms as f64 / 1000.0),
-                None => "Unavailable".into(),
-            });
+            let inverter = ha.active_power_entity.as_deref() == Some(&entity.entity)
+                || ha.dc_power_entity.as_deref() == Some(&entity.entity);
+            let value = if inverter {
+                let age = entity.age_ms.map_or_else(|| "unknown".into(), |ms| format!("{:.1}s", ms as f64 / 1000.0));
+                format!(
+                    "HA last_updated age {age}; {}",
+                    entity.issue.as_deref().unwrap_or("reported; acquisition unverified")
+                )
+            } else {
+                entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
+                    Some(ms) if entity.sample_sequence.is_some() => format!("Telegram age {:.1}s", ms as f64 / 1000.0),
+                    Some(ms) => format!("Last-known HA state-change age {:.1}s", ms as f64 / 1000.0),
+                    None => "Unavailable".into(),
+                })
+            };
             rows.push(row(&entity.entity, value, if entity.issue.is_some() { Tone::Warn } else { Tone::Muted }));
             if let Some(sequence) = entity.sample_sequence {
                 rows.push(row("Atomic sample sequence", sequence.to_string(), Tone::Muted));
@@ -630,14 +664,14 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
         if ha.active_power_entity.is_some() || ha.dc_power_entity.is_some() {
             rows.push(row(
                 "Inverter freshness",
-                "Last-known HA state-change only; acquisition timestamp unavailable",
+                "HA last_updated only; acquisition freshness unverified (acquisition timestamp unavailable)",
                 Tone::Warn,
             ));
         }
         let household_status = if !ha.household_use_enabled {
             "Disabled by default; explicit topology/sign opt-in required"
         } else if ha.household_use_issue.is_none() {
-            "Enabled; provisional HA event proximity gate passed, physical coherence unverified"
+            "Enabled advisory estimate; HA update-age/proximity gates passed, acquisition freshness unverified"
         } else {
             household_unavailable(ha.household_use_issue.as_deref())
         };
@@ -714,12 +748,20 @@ pub fn tooltip(s: &Snapshot) -> String {
             Some(import) if import > 0.0 => format!("Import {}", watts(import)),
             _ => format!("Export {}", watts(e.surplus_w.unwrap_or(0.0))),
         };
-        if s.home_assistant.is_some() {
-            if let Some(ac) = s.inverter.active_power_w {
-                power.push_str(&format!(" | AC {}", kilowatts(ac)));
-            }
-            if let Some(dc) = s.inverter.pv_power_w {
-                power.push_str(&format!(" | DC {}", kilowatts(dc)));
+        if let Some(ha) = &s.home_assistant {
+            for (name, id, value) in [
+                ("AC", ha.active_power_entity.as_deref(), s.inverter.active_power_w),
+                ("DC", ha.dc_power_entity.as_deref(), s.inverter.pv_power_w),
+            ] {
+                if let (Some(id), Some(value)) = (id, value) {
+                    let status = match reported_inverter_status(ha, id) {
+                        None => "unverified",
+                        Some("ha-entity-stale") => "stale",
+                        Some("disconnected") => "disconnected",
+                        _ => "unavailable",
+                    };
+                    power.push_str(&format!(" | {name} reported {} ({status})", kilowatts(value)));
+                }
             }
         } else if let (InverterStatus::Online, Some(pv)) = (s.inverter.status, s.inverter.pv_power_w) {
             power.push_str(&format!(" | PV {}", kilowatts(pv)));

@@ -529,20 +529,29 @@ In either grid mode, optional `activePower` and `dcPower` may map independently 
 `sensor.sg5_0rs_local_total_active_power` (AC) and `sensor.sg5_0rs_local_total_dc_power`
 (DC), both in **W**. The Power now menu shows **Inverter output (AC)** and
 **Solar panels (DC)** as distinct values. Either may be left empty to disable that
-display. Each reading expires independently after `inverterStaleSeconds` (default
-**90 s**); missing, stale, unavailable, malformed, non-finite, out-of-range or
-wrong-unit values affect only that optional display, never atomic grid freshness or
-GO. Bounded signed AC is displayed with its sign unchanged; it is not absolutized
+display. Initial reported values (including unchanged zero) are visible without
+waiting for a numeric change. Each display shows **HA reported**, its actual HA
+update age, and an **acquisition freshness unverified** caveat. After
+`inverterStaleSeconds` (default **90 s**) a reported value stays visible with a
+**stale** label, but cannot support household use. Disconnect retains only an
+explicit **disconnected cached** display and clears the estimate. Missing,
+unknown/unavailable, removed, malformed, non-finite, out-of-range or wrong-unit
+states clear the affected value/estimate, never atomic grid freshness or GO.
+Bounded signed AC is displayed with its sign unchanged; it is not absolutized
 or used for household consumption unless the separate gated calculation below is
 explicitly enabled.
 
 HA exposes no acquisition timestamp/sequence for these optional inverter entities
-in this slice. Their age is therefore only **last-known HA state-change age**,
-not proof that the inverter was polled or that an unchanged zero was freshly
-acquired. The client preserves that original age across equal-value/attribute-only
-updates and reconnect snapshots, and does not use `last_reported`, connectivity,
-or heartbeat activity to renew it. The Connections menu labels this limitation
-explicitly. Physical AC sign, DC interpretation and topology remain unvalidated;
+in this slice. Reported-value age uses validated **HA `last_updated`**, not
+`last_changed`: a static numeric value can have a subsequent HA attribute update.
+That update may support this advisory policy but is **not proof of a physical
+poll**. `last_changed` remains visible separately in diagnostics. An identical
+snapshot/event or reconnect retains the original source age (with monotonic
+aging); receipt time, `last_reported`, connectivity and heartbeats never renew it.
+An advancing `last_updated` is only evidence that HA updated its state object,
+including attributes, not that unchanged power was physically reacquired.
+The Connections menu labels this limitation explicitly. Physical AC sign, DC
+interpretation and topology remain unvalidated;
 household derivation is disabled by default.
 
 ### Optional gated household-use estimate
@@ -578,17 +587,20 @@ missing atomic-grid/AC mappings, missing sign, and an event-skew limit outside
 0-30 seconds.
 
 The calculation also requires a fresh atomic grid sample (the existing maximum
-30-second grid age), a live AC value-change sample younger than the independent
+30-second grid age), a valid HA-reported AC value within the independent
 `inverterStaleSeconds` limit (default **90 s**), and
-`abs(atomic received_at - AC last_changed)` no greater than
+`abs(atomic received_at - AC last_updated)` no greater than
 `householdUse.maxEventSkewSeconds` (default **5 s**, configurable 0-30 s).
 This last comparison is only provisional HA-event proximity: `received_at` and
-`last_changed` are HA-side event times, not proof of simultaneous physical
+`last_updated` are HA-side event times, not proof of simultaneous physical
 measurements. It must not be compared to the DSMR `meter_timestamp` or described
-as physical sample skew. AC `last_changed` is not an acquisition timestamp and
-unchanged values expire even if the inverter may still be polling. Snapshots,
-`last_updated`, `last_reported`, connectivity, heartbeats and cached data cannot
-renew the AC age or satisfy the post-reconnect live-change gate.
+as physical sample skew. AC `last_updated` is not an acquisition timestamp.
+Snapshots may supply advisory AC under their original source age/skew, but never
+supply live atomic acquisition or renew their own timestamp. A new accepted live
+atomic sample is still required after reconnect. Unchanged values without a newer
+HA update age out even if the inverter may still be polling; `last_reported`,
+connectivity and heartbeats cannot refresh them. The menu labels household use
+**advisory**, not decision-grade measurement.
 
 Missing, invalid, stale, skewed or out-of-range AC suppresses only this optional
 calculation; valid atomic grid decisions continue independently. Household use
@@ -645,8 +657,8 @@ for a 31-second stale check, then starts a new client for 15 seconds to check
 recovery/stability reset. It never changes HA, appliances or meter acquisition.
 Output is a sanitized JSON report of durations/counts and safety outcomes, not
 power readings, absolute timestamps, sessions, tokens or device identifiers.
-For each configured AC/DC sensor, it separately counts fresh last-state-change,
-stale, unavailable and invalid polls, plus maximum last-known state-change age;
+For each configured AC/DC sensor, it separately counts recent HA-update,
+stale, unavailable and invalid polls, plus maximum HA-update age;
 these observations are informational and cannot affect atomic-grid acceptance.
 It includes reconnect counts, allowlisted client-code/predicate polling histograms,
 longest observed continuous fresh/candidate intervals and maximum engine stability.

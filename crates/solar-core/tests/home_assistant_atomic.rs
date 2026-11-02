@@ -767,7 +767,7 @@ fn optional_ac_dc_and_unrelated_clocks_never_renew_or_invalidate_atomic_grid() {
     state.state(
         DC,
         &json!({"state":"4200","attributes":{"unit_of_measurement":"W"},
-        "last_changed":iso(AT)}),
+        "last_changed":iso(AT),"last_updated":iso(AT)}),
         AT,
     );
     assert!(state.grid(AT, 30.0).is_some());
@@ -777,7 +777,7 @@ fn optional_ac_dc_and_unrelated_clocks_never_renew_or_invalidate_atomic_grid() {
     state.state("sensor.electricity_meter_timestamp", &json!({"state":iso(AT+20_000)}), AT + 20_000);
     state.state(
         AC,
-        &json!({"state":"3500","last_changed":iso(AT+20_000),
+        &json!({"state":"3500","last_changed":iso(AT+20_000),"last_updated":iso(AT+20_000),
         "attributes":{"unit_of_measurement":"W"}}),
         AT + 20_000,
     );

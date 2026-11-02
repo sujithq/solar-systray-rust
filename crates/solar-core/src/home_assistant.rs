@@ -1477,21 +1477,33 @@ fn run_authenticated_session(
                 let now = crate::now_ms();
                 let mut runtime = lock(runtime);
                 let mut snapshot_times = std::collections::HashMap::new();
+                for id in [&config.active_power, &config.dc_power].into_iter().filter(|id| !id.is_empty()) {
+                    // A missing entity in a complete snapshot must not revive
+                    // the disconnected cache as an active reported value.
+                    runtime.ha_snapshot_state(id, &Value::Null, now);
+                }
+                let source_time = |id: &str, state: &Value| {
+                    let field = if config.entity_index(id).is_some_and(|index| index >= INVERTER_AC) {
+                        "last_updated"
+                    } else {
+                        "last_changed"
+                    };
+                    state[field]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|at| at.timestamp_millis())
+                };
                 for state in states {
                     if let Some(id) = state["entity_id"].as_str().filter(|id| relevant(id)) {
-                        if let Some(at) =
-                            state["last_changed"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                        {
-                            snapshot_times.insert(id.to_string(), at.timestamp_millis());
+                        if let Some(at) = source_time(id, state) {
+                            snapshot_times.insert(id.to_string(), at);
                         }
                         runtime.ha_snapshot_state(id, state, now);
                     }
                 }
                 for (id, state) in buffered.drain(..) {
-                    if let (Some(snapshot_at), Some(event_at)) = (
-                        snapshot_times.get(&id),
-                        state["last_changed"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()),
-                    ) && event_at.timestamp_millis() < *snapshot_at
+                    if let (Some(snapshot_at), Some(event_at)) = (snapshot_times.get(&id), source_time(&id, &state))
+                        && event_at < *snapshot_at
                     {
                         continue;
                     }
@@ -1677,7 +1689,7 @@ impl HaState {
                         ha_last_updated: o.and_then(|o| o.updated),
                         ha_last_reported: o.and_then(|o| o.reported),
                         received_age_ms: o.map(|o| o.received.elapsed().as_millis().min(u64::MAX as u128) as u64),
-                        evidence_at: s.map(|s| s.at),
+                        evidence_at: (i < INVERTER_AC).then(|| s.map(|s| s.at)).flatten(),
                         age_ms: s.map(|s| s.age(now)),
                         issue: self.issues[i].clone().or_else(|| {
                             let limit =
@@ -1705,7 +1717,9 @@ impl HaState {
 
     pub fn disconnect(&mut self, issue: &str) {
         self.atomic.invalidate(issue);
-        self.samples = std::array::from_fn(|_| None);
+        // Retain optional reported values for a disconnected display only.
+        self.samples[GRID_IMPORT] = None;
+        self.samples[GRID_EXPORT] = None;
         self.live_changes = [false; SAMPLE_COUNT];
         self.ready = false;
         self.stats.connected = false;
@@ -1780,20 +1794,24 @@ impl HaState {
             if !raw.is_finite() || !normalized.is_finite() || !valid_value {
                 return Err("ha-invalid-meter-value");
             }
-            let at = chrono::DateTime::parse_from_rfc3339(value["last_changed"].as_str().ok_or("ha-timestamp")?)
-                .map_err(|_| "ha-timestamp")?
-                .timestamp_millis();
-            if at <= 0 || at > now {
+            let changed_at =
+                chrono::DateTime::parse_from_rfc3339(value["last_changed"].as_str().ok_or("ha-timestamp")?)
+                    .map_err(|_| "ha-timestamp")?
+                    .timestamp_millis();
+            if changed_at <= 0 || changed_at > now {
                 return Err("ha-timestamp");
             }
             for key in ["last_updated", "last_reported"] {
                 if !value[key].is_null() {
                     let time = stamp(key).ok_or("ha-timestamp")?;
-                    if time < at || time > now {
+                    if time < changed_at || time > now {
                         return Err("ha-timestamp");
                     }
                 }
             }
+            // HA last_updated includes attribute changes, not necessarily a
+            // hardware poll. It supports reported/advisory use only, never GO.
+            let at = if index >= INVERTER_AC { stamp("last_updated").ok_or("ha-timestamp")? } else { changed_at };
             Ok(Sample { value: normalized, at, reported_at: at, received: Instant::now(), age_at_receive: now - at })
         })();
         match parsed {
@@ -1812,7 +1830,7 @@ impl HaState {
                         }
                         return;
                     }
-                    if sample.value == old.value {
+                    if (index < INVERTER_AC && sample.value == old.value) || sample.reported_at == old.reported_at {
                         sample.at = old.at;
                         sample.received = old.received;
                         sample.age_at_receive = old.age_at_receive;
@@ -1902,23 +1920,32 @@ impl HaState {
                 && now >= s.at
                 && s.age(now) as f64 <= self.config.inverter_stale_seconds * 1000.0
         };
-        let ac = self.samples[2].as_ref().filter(|s| is_fresh(s));
-        let dc = self.samples[3].as_ref().filter(|s| is_fresh(s));
+        let ac = self.samples[INVERTER_AC].as_ref();
+        let dc = self.samples[INVERTER_DC].as_ref();
         let active_power_w = ac.map(|s| s.value);
         let pv_power_w = dc.map(|s| s.value);
         if active_power_w.is_none() && pv_power_w.is_none() {
-            return InverterSnapshot::without_reading(
-                InverterStatus::Offline,
-                Some("ha-inverter-unavailable-or-stale".into()),
-            );
+            return InverterSnapshot::without_reading(InverterStatus::Offline, Some("ha-inverter-unavailable".into()));
         }
         InverterSnapshot {
-            status: InverterStatus::Online,
+            status: if ac.is_some_and(is_fresh) || dc.is_some_and(is_fresh) {
+                InverterStatus::Online
+            } else {
+                InverterStatus::Offline
+            },
             active_power_w,
             pv_power_w,
             household_use_w: None,
             timestamp: ac.map(|s| s.at).into_iter().chain(dc.map(|s| s.at)).max(),
-            issue: None,
+            issue: if !self.stats.connected {
+                Some("ha-inverter-reported-disconnected".into())
+            } else if !self.ready {
+                Some("ha-inverter-reported-initializing".into())
+            } else if ac.is_some_and(|s| !is_fresh(s)) || dc.is_some_and(|s| !is_fresh(s)) {
+                Some("ha-inverter-reported-stale".into())
+            } else {
+                None
+            },
         }
     }
 
@@ -1946,9 +1973,6 @@ impl HaState {
         }
         let grid = self.atomic.sample.as_ref().ok_or("ha-household-grid-unavailable")?;
         let ac = self.samples[2].as_ref().ok_or("ha-household-ac-unavailable")?;
-        if !self.live_changes[2] {
-            return Err("ha-household-awaiting-live-ac");
-        }
         if now < ac.at || ac.age(now) as f64 > self.config.inverter_stale_seconds * 1000.0 {
             return Err("ha-household-ac-stale");
         }
