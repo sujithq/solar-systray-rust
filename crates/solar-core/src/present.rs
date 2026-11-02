@@ -383,7 +383,24 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
         (true, Some(import), Some(export), Some(since)) => {
             let mut rows = Vec::new();
             if s.home_assistant.is_some() {
-                rows.push(row("Coverage", "Partial today; baseline starts during this run", Tone::Warn));
+                let midnight = s.daily_coverage.as_ref().is_some_and(|coverage| coverage.midnight);
+                rows.push(row(
+                    "Coverage",
+                    if midnight {
+                        "Today from validated Brussels midnight"
+                    } else {
+                        "Partial today; exact observed baseline"
+                    },
+                    if midnight { Tone::Text } else { Tone::Warn },
+                ));
+                if let Some(coverage) = &s.daily_coverage {
+                    rows.push(row("Baseline sample", meter_instant(coverage.since), Tone::Muted));
+                    rows.push(row("Through sample", meter_instant(coverage.through), Tone::Muted));
+                    rows.push(row("Counter source", &coverage.provenance, Tone::Muted));
+                }
+                if let Some(issue) = &s.daily_history_issue {
+                    rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+                }
             }
             rows.extend([
                 row("Imported", kilowatt_hours(import), Tone::Text),
@@ -405,8 +422,38 @@ fn today_rows(s: &Snapshot) -> Vec<Row> {
             if let Some(why) = daily_reason_text(&d.reason) {
                 rows.push(row("Why", why, Tone::Muted));
             }
+            if let Some(issue) = &s.daily_history_issue {
+                rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+            }
             rows
         }
+    }
+}
+
+fn meter_instant(at: i64) -> String {
+    let Some(c) = crate::home_assistant::belgian_meter_calendar(at) else { return "Unavailable".into() };
+    let (year, month, day) = crate::civil_from_days(c.day);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}.{:03} Europe/Brussels UTC+{:02}:00",
+        c.minute / 60,
+        c.minute % 60,
+        at.div_euclid(1000).rem_euclid(60),
+        at.rem_euclid(1000),
+        c.offset_minutes / 60
+    )
+}
+
+fn daily_history_text(issue: &str) -> &str {
+    match issue {
+        "daily-history-no-midnight-sample" => "No exact midnight counter sample; partial coverage only",
+        "daily-history-missing-atomic-counters" => "Recorded samples lack valid atomic counters; partial coverage only",
+        "daily-history-gap" | "daily-history-sequence-gap" => "Counter history has a gap; partial coverage only",
+        "daily-history-counter-decreased" => "Counter reset/decrease; no arithmetic across reset",
+        "daily-history-session-changed" => "Publisher session changed; partial coverage only",
+        "daily-history-loading" => "Checking recorded midnight/continuity",
+        "daily-history-cache-awaiting-bridge" => "Saved baseline awaiting a recorded bridge to live counters",
+        "daily-history-anchor-not-recorded" => "Live anchor not yet in recorder; partial coverage only",
+        _ => issue,
     }
 }
 
@@ -574,7 +621,11 @@ pub fn tooltip(s: &Snapshot) -> String {
         if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
             lines.push(format!(
                 "{} in {} / out {}",
-                if s.home_assistant.is_some() { "Partial today" } else { "Today" },
+                if s.home_assistant.is_some() && !s.daily_coverage.as_ref().is_some_and(|coverage| coverage.midnight) {
+                    "Partial today"
+                } else {
+                    "Today"
+                },
                 kilowatt_hours(import).trim_end_matches(" kWh"),
                 kilowatt_hours(export)
             ));

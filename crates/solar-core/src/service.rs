@@ -46,6 +46,7 @@ impl SolarService {
         let mock = config.is_mock();
         let ha = config.is_ha().then(|| config.home_assistant.clone());
         let baseline_config = (config.is_ha() && config.home_assistant.night_baseline_enabled).then(|| config.clone());
+        let daily_config = (config.is_ha() && !config.home_assistant.atomic_grid.is_empty()).then(|| config.clone());
         let inverter = config.inverter_enabled().then(|| config.inverter_source.clone());
         let source = (config.energy_source.host.clone(), config.energy_source.port);
         let runtime = Arc::new(Mutex::new(Runtime::new(config)));
@@ -54,7 +55,7 @@ impl SolarService {
             thread::Builder::new().name(name.into()).spawn(body).expect("spawn worker thread");
         };
         if let Some(config) = baseline_config {
-            if let Some(path) = baseline_path {
+            if let Some(path) = baseline_path.clone() {
                 let mut status = crate::ha_baseline::HistoryStatus::default();
                 match crate::ha_baseline::load_cache(&path, &config, now_ms()) {
                     Ok(baseline) => status.baseline = baseline,
@@ -72,6 +73,21 @@ impl SolarService {
                     issue: Some("history-persistence-not-configured".into()),
                 });
             }
+        }
+        if let Some(config) = daily_config {
+            let path = baseline_path.map(|path| path.with_extension("daily-energy.json"));
+            if let Some(path) = &path {
+                match crate::ha_daily::load_cache(path, &config, now_ms()) {
+                    Ok(Some(baseline)) => lock(&runtime).restore_daily_baseline(baseline),
+                    Ok(None) => {}
+                    Err(issue) => lock(&runtime).daily_history_issue(issue),
+                }
+            }
+            let (runtime, stop) = (runtime.clone(), stop.clone());
+            spawn(
+                "solar-ha-daily-history",
+                Box::new(move || crate::ha_daily::worker(&runtime, &stop, path.as_deref(), &config)),
+            );
         }
         {
             let (runtime, stop) = (runtime.clone(), stop.clone());

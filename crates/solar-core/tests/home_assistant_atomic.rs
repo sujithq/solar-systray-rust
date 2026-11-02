@@ -172,7 +172,7 @@ fn atomic_optional_fields_feed_existing_peak_and_partial_day_engines() {
     assert_eq!(first.daily_energy.export_wh, Some(0));
     assert_eq!(
         solar_info(&first).section("Today").unwrap().value("Coverage"),
-        Some("Partial today; baseline starts during this run")
+        Some("Partial today; exact observed baseline")
     );
     assert!(tooltip(&first).contains("Partial today in "));
 

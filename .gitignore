@@ -16,5 +16,7 @@ target/
 # Private recorded baseline provenance and source/location identity.
 *.night-baseline.json
 *.night-baseline.json.tmp
+*.daily-energy.json
+*.daily-energy.json.tmp
 
 # End of https://www.toptal.com/developers/gitignore/api/rust

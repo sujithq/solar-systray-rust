@@ -318,19 +318,68 @@ round-tripped for configuration compatibility but are no longer subscribed to
 or used for these features. No new mappings or private-config changes are needed.
 
 The quarter-hour engine uses the atomic grid import, validated current-demand
-and current-month-peak states, and the meter clock. Daily energy reuses the
-existing counter-delta engine. Its baseline begins at the first qualifying
-sample observed during this run, so **Today** is explicitly marked partial and
-shows the meter-local start time; it is not represented as a midnight-to-now
-total. A decreasing/reset counter invalidates the result until the next local
-meter day, while a day or month boundary is evaluated in Brussels time,
-including DST. No inverter yield or instantaneous-power estimate substitutes
-for tariff counters.
+and current-month-peak states, and the meter clock. **Today** uses differences
+of the four cumulative counters, with recorded baseline recovery described
+below. A decreasing/reset counter invalidates the live result until the next
+Brussels meter day. No inverter yield or instantaneous-power estimate
+substitutes for tariff counters.
 
 This is client support, not evidence that the publisher extension is deployed.
 Live acceptance still requires observing extended telegrams, unchanged optional
 values across advancing sequences, unavailable/recovery behavior, month identity
 and partial counter deltas. Physical measurement correctness remains unverified.
+
+#### Recorded Today baseline and exact coverage
+
+On startup, day rollover and recovery, the client tries to recover recorded
+atomic counters through an independent authenticated **WebSocket-only**
+`history/history_during_period` reader. This runs once fresh live counters
+provide an anchor, checked every 30 seconds; unsuccessful attempts retry no more
+than once per 15 minutes while valid live counters are available. No REST,
+recorder statistics, direct database/device read or HA write is used.
+The reader allows a cancellable ten-second recorder-commit grace period after
+capturing the anchor while buffering live updates; it still requires that exact
+anchor in the returned history. The grace period itself proves nothing.
+
+The narrow full-day policy requires a real atomic counter sample with
+`meter_timestamp` **exactly at Europe/Brussels local midnight**, followed by a
+continuous recorded/live counter chain through the captured live sample. All
+four counters must be valid in each sample, nondecreasing, in one publisher
+session with consecutive sequences, advancing meter/callback times and gaps
+strictly below 30 seconds. A later/nearest sample is **not** called midnight;
+counters are not interpolated across gaps. The actual midnight and next
+midnight are computed in Brussels time, so DST days span 23 or 25 hours rather
+than a fixed 24 hours.
+
+When that evidence exists, coverage says **Today from validated Brussels
+midnight**. Otherwise it remains **Partial today; exact observed baseline**,
+with the actual baseline and last-covered meter timestamps (date, seconds,
+milliseconds, Brussels timezone and UTC offset), plus the recorded-history
+reason. This can stay partial indefinitely when no telegram lands exactly at
+midnight, history is absent, recorder rows lack full attributes, sequences/gaps
+are missing or a publisher session changes. In particular, grid-only history
+from before the optional-field extension cannot reconstruct this day's energy.
+Relaunching does not manufacture missing midnight/counter evidence.
+
+The native app privately saves source/day-bound counter baselines and their
+last validated point, units and provenance next to its night-baseline cache,
+with suffix `.daily-energy.json`. It retains no raw history or token in that
+cache. Restart/reconnect restores earlier totals only after recorded continuity
+bridges the saved point to a matching live anchor; saved values alone cannot
+make the current result available. Source/config identity changes, day rollover
+and counter resets cannot produce cross-source/day/reset subtraction. The
+partial baseline may also survive a restart when its bridge is valid. Without
+a configured private store (library use), recovery works but is not persistent.
+
+Daily queries stream five-minute chunks, with the existing 1 MiB message limit,
+20-second command and 180-second overall deadlines, at most 128 MiB of response
+text and 100,000 samples for at most one 25-hour day. Oversized/late/malformed
+responses fail explicitly rather than weakening coverage. Results must match
+the requested day and exact live acquisition anchor; bounded concurrent live
+updates are joined before applying a result. Historical readings never advance
+live grid freshness, GO, household use or forecast inputs. History errors leave
+valid independent live calculations and an honestly labeled partial day intact.
+Night-baseline scheduling/statistics remain unchanged.
 
 #### Conservative separate-entity mode
 

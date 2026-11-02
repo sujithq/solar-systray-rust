@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- HA Today energy can recover a validated Brussels-midnight four-counter
+  baseline from bounded WebSocket recorder history, persist source/day-bound
+  provenance privately, and bridge restart/reconnect to live counters.
+  Exact midnight, continuous sequences and nondecreasing counters are required;
+  missing/pre-extension/gapped history stays explicitly partial with exact
+  sample coverage, never interpolated or counted as live freshness.
 - HA night baseline restored from a private source-bound cache at startup and
   recalculated from recorded atomic samples at a configurable Brussels-local
   daily time (default 06:00). Only completed nights with real minute-sample

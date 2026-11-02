@@ -340,7 +340,7 @@ pub(crate) struct BelgianCalendar {
     month: i64,
     pub(crate) day: i64,
     pub(crate) minute: i64,
-    offset_minutes: i64,
+    pub(crate) offset_minutes: i64,
 }
 
 fn last_sunday(year: i64, month: u32) -> i64 {
@@ -749,9 +749,69 @@ fn recorded_night_with_token(
     window: crate::ha_baseline::NightWindow,
     token: &str,
 ) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
+    let mut samples = crate::ha_baseline::NightSamples::new(window);
+    query_history(config, stop, token, window.start, window.end, 32 * MAX_MESSAGE, |result, start, end| {
+        append_recorded_states(&mut samples, config, result, start, end)
+    })?;
+    samples.finish(crate::now_ms())
+}
+
+pub(crate) fn recorded_daily(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    request: &crate::ha_daily::HistoryRequest,
+) -> Result<crate::ha_daily::CounterBaseline, &'static str> {
+    let token = std::env::var(&config.home_assistant.token_env).map_err(|_| "history-token-missing")?;
+    if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
+        return Err("history-token-invalid");
+    }
+    recorded_daily_with_token(config, stop, request, &token)
+}
+
+fn recorded_daily_with_token(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    request: &crate::ha_daily::HistoryRequest,
+    token: &str,
+) -> Result<crate::ha_daily::CounterBaseline, &'static str> {
+    let (start, end) = request.window().ok_or("daily-history-calendar")?;
+    if end <= start || end - start > 25 * 3_600_000 + 60_000 {
+        return Err("daily-history-window");
+    }
+    let mut samples = crate::ha_daily::HistorySamples::new(request.clone());
+    let (midnight, _) = crate::ha_daily::day_bounds(request.anchor.meter_at).ok_or("daily-history-calendar")?;
+    query_history(config, stop, token, start, end, 128 * MAX_MESSAGE, |result, start, end| {
+        for state in recorded_states(result, &config.home_assistant.atomic_grid)? {
+            let payload = recorded_payload(state, start, end)?;
+            if payload.meter_at < midnight {
+                continue;
+            }
+            let totals = payload.optional.counters.map_err(|_| "daily-history-missing-atomic-counters")?;
+            samples.add(crate::ha_daily::CounterSample {
+                session: payload.session,
+                sequence: payload.sequence,
+                meter_at: payload.meter_at,
+                received_at: payload.publisher_at,
+                totals,
+            })?;
+        }
+        Ok(())
+    })?;
+    samples.finish()
+}
+
+fn query_history(
+    config: &crate::SolarConfig,
+    stop: &AtomicBool,
+    token: &str,
+    start: i64,
+    end: i64,
+    mut budget: usize,
+    mut append: impl FnMut(&Value, i64, i64) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
     let ha = &config.home_assistant;
+    let chunk = if budget > 32 * MAX_MESSAGE { 5 } else { 15 };
     let overall = Instant::now() + Duration::from_secs(180);
-    let mut budget = 32 * MAX_MESSAGE;
     let mut ws = open(ha).map_err(|_| "history-connect-or-tls")?;
     let read = |ws: &mut Socket, budget: &mut usize| -> Result<Value, &'static str> {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -788,17 +848,17 @@ fn recorded_night_with_token(
     if read(&mut ws, &mut budget)?["type"] != "auth_ok" {
         return Err("history-auth-rejected");
     }
-    let mut samples = crate::ha_baseline::NightSamples::new(window);
-    let mut start = window.start;
+    let mut start = start;
     let mut id = 1_u64;
-    while start < window.end {
-        let end = (start + 15 * 60_000).min(window.end);
+    while start < end {
+        // Smaller daily chunks keep extended attributes below the 1 MiB frame limit.
+        let chunk_end = (start + chunk * 60_000).min(end);
         let iso = |at| chrono::DateTime::from_timestamp_millis(at).map(|time| time.to_rfc3339());
         send(
             &mut ws,
             json!({
                 "id":id,"type":"history/history_during_period",
-                "start_time":iso(start),"end_time":iso(end),
+                "start_time":iso(start),"end_time":iso(chunk_end),
                 "entity_ids":[ha.atomic_grid],
                 "include_start_time_state":false,"significant_changes_only":false,
                 "minimal_response":false,"no_attributes":false
@@ -811,11 +871,36 @@ fn recorded_night_with_token(
         if result["success"] != true {
             return Err("history-query-rejected");
         }
-        append_recorded_states(&mut samples, config, &result["result"], start, end)?;
-        start = end;
+        append(&result["result"], start, chunk_end)?;
+        start = chunk_end;
         id += 1;
     }
-    samples.finish(crate::now_ms())
+    Ok(())
+}
+
+fn recorded_states<'a>(result: &'a Value, entity: &str) -> Result<&'a [Value], &'static str> {
+    let object = result.as_object().ok_or("history-response-shape")?;
+    if object.keys().any(|key| key != entity) {
+        return Err("history-response-entity");
+    }
+    match object.get(entity) {
+        None => Ok(&[]),
+        Some(states) => {
+            states.as_array().filter(|s| s.len() <= 10_000).map(Vec::as_slice).ok_or("history-response-limit")
+        }
+    }
+}
+
+fn recorded_payload(state: &Value, start: i64, end: i64) -> Result<AtomicPayload, &'static str> {
+    let normalized = json!({"state":state["s"],"attributes":state["a"]});
+    let received_at = state["a"]["received_at"].as_str().ok_or("history-missing-acquisition")?;
+    let received_at = utc_timestamp(received_at).map_err(|_| "history-invalid-acquisition")?;
+    let payload = atomic_payload(&normalized, received_at).map_err(|_| "history-invalid-atomic-sample")?;
+    let updated = state["lu"].as_f64().filter(|v| v.is_finite()).ok_or("history-missing-recorder-time")? * 1000.0;
+    if !(start as f64..=end as f64).contains(&updated) || (updated - received_at as f64).abs() >= 30_000.0 {
+        return Err("history-recorder-time-mismatch");
+    }
+    Ok(payload)
 }
 
 fn append_recorded_states(
@@ -825,24 +910,10 @@ fn append_recorded_states(
     start: i64,
     end: i64,
 ) -> Result<(), &'static str> {
-    let object = result.as_object().ok_or("history-response-shape")?;
-    if object.keys().any(|key| key != &config.home_assistant.atomic_grid) {
-        return Err("history-response-entity");
-    }
-    let Some(states) = object.get(&config.home_assistant.atomic_grid) else { return Ok(()) };
-    let states = states.as_array().filter(|s| s.len() <= 10_000).ok_or("history-response-limit")?;
-    for state in states {
+    for state in recorded_states(result, &config.home_assistant.atomic_grid)? {
         // HA's history WebSocket API returns compressed s/a/lu/lc states.
         // Attributes must remain present; statistics/means cannot replace them.
-        let normalized = json!({"state":state["s"],"attributes":state["a"]});
-        let received_at = state["a"]["received_at"].as_str().ok_or("history-missing-acquisition")?;
-        let received_at = utc_timestamp(received_at).map_err(|_| "history-invalid-acquisition")?;
-        let payload = atomic_payload(&normalized, received_at).map_err(|_| "history-invalid-atomic-sample")?;
-        let updated = state["lu"].as_f64().filter(|v| v.is_finite()).ok_or("history-missing-recorder-time")?;
-        let updated = updated * 1000.0;
-        if !(start as f64..=end as f64).contains(&updated) || (updated - received_at as f64).abs() >= 30_000.0 {
-            return Err("history-recorder-time-mismatch");
-        }
+        let payload = recorded_payload(state, start, end)?;
         if !crate::ha_baseline::validate_night_sample(config, payload.meter_at) {
             samples.reject("history-daytime-sample");
             continue;
@@ -876,6 +947,100 @@ mod recorded_history_tests {
             "schema_version":1,"session":"fixture-session","sample_sequence":sequence,
             "meter_timestamp":iso(at),"received_at":iso(at),"import_w":320.0,"export_w":0.0
         }})
+    }
+
+    fn counter_state(at: i64, midnight: i64) -> Value {
+        let sequence = ((at - midnight) / 10_000 + 1) as u64;
+        let mut state = state(at, sequence);
+        state["a"]["import_tariff_1_wh"] = json!(100_000 + sequence);
+        state["a"]["import_tariff_2_wh"] = json!(0);
+        state["a"]["export_tariff_1_wh"] = json!(20_000 + sequence);
+        state["a"]["export_tariff_2_wh"] = json!(0);
+        state["a"]["optional_status"] = json!({
+            "demand":"missing","monthly_peak":"missing","import_tariff_1":"available",
+            "import_tariff_2":"available","export_tariff_1":"available","export_tariff_2":"available"
+        });
+        state
+    }
+
+    #[test]
+    fn daily_websocket_history_recovers_midnight_without_feeding_live_freshness() {
+        for fault in ["none", "old-schema", "no-midnight", "gap", "unavailable", "wrong-entity"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut config = config();
+            config.home_assistant.endpoint = format!("ws://{}/api/websocket", listener.local_addr().unwrap());
+            let start = utc_timestamp("2026-10-24T22:00:00Z").unwrap();
+            let anchor = start + 40 * 60_000;
+            let mut runtime = crate::Runtime::new(config.clone());
+            runtime.ha_connected();
+            runtime.ha_ready();
+            let value = counter_state(anchor, start);
+            runtime.ha_state("sensor.fixture_atomic", &json!({"state":value["s"],"attributes":value["a"]}), anchor);
+            let request = runtime.daily_history_request(anchor).unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut ws = tungstenite::accept(stream).unwrap();
+                ws.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+                let _ = ws.read().unwrap();
+                ws.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).unwrap();
+                while let Ok(message) = ws.read() {
+                    let query: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    assert_eq!(query["type"], "history/history_during_period");
+                    assert_eq!(query["entity_ids"], json!(["sensor.fixture_atomic"]));
+                    for flag in
+                        ["minimal_response", "significant_changes_only", "no_attributes", "include_start_time_state"]
+                    {
+                        assert_eq!(query[flag], false);
+                    }
+                    let from = utc_timestamp(query["start_time"].as_str().unwrap()).unwrap();
+                    let to = utc_timestamp(query["end_time"].as_str().unwrap()).unwrap();
+                    assert!(to - from <= 5 * 60_000);
+                    let mut states = Vec::new();
+                    for at in (start..=anchor).step_by(10_000) {
+                        if at < from || at >= to {
+                            continue;
+                        }
+                        if fault == "no-midnight" && at == start {
+                            continue;
+                        }
+                        if fault == "gap" && (start + 60_000..start + 90_000).contains(&at) {
+                            continue;
+                        }
+                        let mut value = counter_state(at, start);
+                        if fault == "old-schema" {
+                            value = state(at, (at - start) as u64 + 1);
+                        }
+                        if fault == "unavailable" && at == start + 60_000 {
+                            value["s"] = json!("unavailable");
+                        }
+                        states.push(value);
+                    }
+                    let entity = if fault == "wrong-entity" { "sensor.wrong" } else { "sensor.fixture_atomic" };
+                    let result = json!({"id":query["id"],"type":"result","success":true,"result":{entity:states}});
+                    if ws.send(Message::Text(result.to_string().into())).is_err() {
+                        break;
+                    }
+                }
+            });
+            let result = recorded_daily_with_token(&config, &AtomicBool::new(false), &request, "fixture-token");
+            let expected = match fault {
+                "none" => None,
+                "old-schema" => Some("daily-history-missing-atomic-counters"),
+                "no-midnight" => Some("daily-history-no-midnight-sample"),
+                "gap" => Some("daily-history-gap"),
+                "unavailable" => Some("history-invalid-atomic-sample"),
+                _ => Some("history-response-entity"),
+            };
+            assert_eq!(result.as_ref().err().copied(), expected, "{fault}");
+            runtime.complete_daily_history(&request, result);
+            let snapshot = runtime.snapshot(anchor);
+            assert_eq!(snapshot.reading_at, Some(anchor), "history cannot advance live measurement time");
+            assert_eq!(snapshot.daily_coverage.as_ref().unwrap().midnight, fault == "none");
+            assert_eq!(snapshot.daily_energy.import_wh, Some(if fault == "none" { 240 } else { 0 }));
+            assert!(!runtime.snapshot(anchor + 30_000).daily_energy.available);
+            server.join().unwrap();
+        }
     }
 
     #[test]
@@ -1161,6 +1326,17 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaCon
 }
 
 impl HaState {
+    pub(crate) fn counter_sample(&self, now: i64) -> Option<crate::ha_daily::CounterSample> {
+        let payload = self.optional_payload(now).ok()?;
+        Some(crate::ha_daily::CounterSample {
+            session: payload.session.clone(),
+            sequence: payload.sequence,
+            meter_at: payload.meter_at,
+            received_at: payload.publisher_at,
+            totals: *payload.optional.counters.as_ref().ok()?,
+        })
+    }
+
     fn optional_payload(&self, now: i64) -> Result<&AtomicPayload, &'static str> {
         if !self.stats.connected || !self.ready {
             return Err("ha-meter-data-disconnected");
