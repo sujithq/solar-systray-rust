@@ -276,7 +276,14 @@ mod tests {
         let solar = json!({"energySource":{"type":"home-assistant"},
             "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3,"atomicGrid":"sensor.dsmr_atomic_grid_sample_2",
                 "activePower":"sensor.sg5_0rs_local_total_active_power","dcPower":"sensor.sg5_0rs_local_total_dc_power",
-                "householdUse":{"enabled":false,"topology":"","generationSign":0,"maxEventSkewSeconds":4}}});
+            "currentDemand":"sensor.electricity_meter_current_average_demand",
+            "monthlyPeak":"sensor.electricity_meter_maximum_demand_current_month",
+            "energyImportTariff1":"sensor.electricity_meter_energy_consumption_tarif_1",
+            "energyImportTariff2":"sensor.electricity_meter_energy_consumption_tarif_2",
+            "energyExportTariff1":"sensor.electricity_meter_energy_production_tarif_1",
+            "energyExportTariff2":"sensor.electricity_meter_energy_production_tarif_2",
+            "meterDataStaleSeconds":75,"meterDataMaxEventSkewSeconds":25,
+            "householdUse":{"enabled":false,"topology":"","generationSign":0,"maxEventSkewSeconds":4}}});
         let text = render(&solar, &TraySettings::default());
         let (saved, config, _) = parse(&text).unwrap();
         assert!(config.is_ha());
@@ -286,6 +293,14 @@ mod tests {
         assert_eq!(config.home_assistant.atomic_grid, "sensor.dsmr_atomic_grid_sample_2");
         assert_eq!(config.home_assistant.active_power, "sensor.sg5_0rs_local_total_active_power");
         assert_eq!(config.home_assistant.dc_power, "sensor.sg5_0rs_local_total_dc_power");
+        assert_eq!(config.home_assistant.current_demand, "sensor.electricity_meter_current_average_demand");
+        assert_eq!(config.home_assistant.monthly_peak, "sensor.electricity_meter_maximum_demand_current_month");
+        assert_eq!(config.home_assistant.energy_import_tariff1, "sensor.electricity_meter_energy_consumption_tarif_1");
+        assert_eq!(config.home_assistant.energy_import_tariff2, "sensor.electricity_meter_energy_consumption_tarif_2");
+        assert_eq!(config.home_assistant.energy_export_tariff1, "sensor.electricity_meter_energy_production_tarif_1");
+        assert_eq!(config.home_assistant.energy_export_tariff2, "sensor.electricity_meter_energy_production_tarif_2");
+        assert_eq!(config.home_assistant.meter_data_stale_seconds, 75.0);
+        assert_eq!(config.home_assistant.meter_data_max_event_skew_seconds, 25.0);
         assert!(!config.home_assistant.household_use_enabled);
         assert_eq!(config.home_assistant.household_max_event_skew_seconds, 4.0);
         let companion = json!({"mode":"solar","solar":solar}).to_string();

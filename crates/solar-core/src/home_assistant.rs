@@ -2,14 +2,26 @@
 //! provide acquisition evidence; separate entity changes remain provisional.
 
 use crate::config::ConfigError;
-use crate::reading::Reading;
+use crate::reading::{EnergyTotals, Reading};
 use crate::slimmelezer::MeterStats;
 use crate::sungrow::{InverterSnapshot, InverterStatus};
+use crate::{civil_from_days, days_from_civil};
 use serde_json::{Value, json};
 use std::net::{IpAddr, SocketAddr};
 
 pub const MAX_MESSAGE: usize = 1_048_576;
 pub const HOUSEHOLD_TOPOLOGY_SINGLE_GRID_INVERTER: &str = "single_grid_connected_inverter";
+const GRID_IMPORT: usize = 0;
+const GRID_EXPORT: usize = 1;
+const INVERTER_AC: usize = 2;
+const INVERTER_DC: usize = 3;
+const CURRENT_DEMAND: usize = 4;
+const MONTHLY_PEAK: usize = 5;
+const ENERGY_IMPORT_TARIFF_1: usize = 6;
+const ENERGY_IMPORT_TARIFF_2: usize = 7;
+const ENERGY_EXPORT_TARIFF_1: usize = 8;
+const ENERGY_EXPORT_TARIFF_2: usize = 9;
+const SAMPLE_COUNT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HaConfig {
@@ -22,6 +34,14 @@ pub struct HaConfig {
     pub dc_power: String,
     pub inverter_stale_seconds: f64,
     pub grid_skew_seconds: f64,
+    pub current_demand: String,
+    pub monthly_peak: String,
+    pub energy_import_tariff1: String,
+    pub energy_import_tariff2: String,
+    pub energy_export_tariff1: String,
+    pub energy_export_tariff2: String,
+    pub meter_data_stale_seconds: f64,
+    pub meter_data_max_event_skew_seconds: f64,
     pub household_use_enabled: bool,
     pub household_topology: String,
     pub ac_generation_sign: i8,
@@ -42,6 +62,14 @@ impl HaConfig {
             dc_power: text("dcPower")?.into(),
             inverter_stale_seconds: v["inverterStaleSeconds"].as_f64().ok_or_else(error)?,
             grid_skew_seconds: v["gridSkewSeconds"].as_f64().ok_or_else(error)?,
+            current_demand: text("currentDemand")?.into(),
+            monthly_peak: text("monthlyPeak")?.into(),
+            energy_import_tariff1: text("energyImportTariff1")?.into(),
+            energy_import_tariff2: text("energyImportTariff2")?.into(),
+            energy_export_tariff1: text("energyExportTariff1")?.into(),
+            energy_export_tariff2: text("energyExportTariff2")?.into(),
+            meter_data_stale_seconds: v["meterDataStaleSeconds"].as_f64().ok_or_else(error)?,
+            meter_data_max_event_skew_seconds: v["meterDataMaxEventSkewSeconds"].as_f64().ok_or_else(error)?,
             household_use_enabled: v["householdUse"]["enabled"].as_bool().ok_or_else(error)?,
             household_topology: v["householdUse"]["topology"].as_str().ok_or_else(error)?.into(),
             ac_generation_sign: v["householdUse"]["generationSign"]
@@ -57,6 +85,21 @@ impl HaConfig {
                 && (8..=128).contains(&s.len())
                 && s[7..].bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         };
+        let meter_entities = [
+            &config.current_demand,
+            &config.monthly_peak,
+            &config.energy_import_tariff1,
+            &config.energy_import_tariff2,
+            &config.energy_export_tariff1,
+            &config.energy_export_tariff2,
+        ];
+        let mut unique_entities = vec![&config.grid_import, &config.grid_export];
+        unique_entities.extend(
+            [&config.atomic_grid, &config.active_power, &config.dc_power].into_iter().filter(|id| !id.is_empty()),
+        );
+        unique_entities.extend(meter_entities.iter().copied().filter(|id| !id.is_empty()));
+        let entities_are_unique =
+            unique_entities.iter().enumerate().all(|(index, id)| !unique_entities[..index].contains(id));
         if env.is_empty()
             || env.len() > 128
             || !(env[0].is_ascii_uppercase() || env[0] == b'_')
@@ -65,6 +108,8 @@ impl HaConfig {
             || !entity(&config.grid_export)
             || (!config.active_power.is_empty() && !entity(&config.active_power))
             || (!config.dc_power.is_empty() && !entity(&config.dc_power))
+            || meter_entities.iter().any(|id| !id.is_empty() && !entity(id))
+            || !entities_are_unique
             || (!config.atomic_grid.is_empty()
                 && (!entity(&config.atomic_grid)
                     || config.atomic_grid == config.grid_import
@@ -81,6 +126,10 @@ impl HaConfig {
             || !(1.0..=86400.0).contains(&config.inverter_stale_seconds)
             || !config.grid_skew_seconds.is_finite()
             || !(0.0..=30.0).contains(&config.grid_skew_seconds)
+            || !config.meter_data_stale_seconds.is_finite()
+            || !(1.0..=86400.0).contains(&config.meter_data_stale_seconds)
+            || !config.meter_data_max_event_skew_seconds.is_finite()
+            || !(0.0..=30.0).contains(&config.meter_data_max_event_skew_seconds)
             || !config.household_max_event_skew_seconds.is_finite()
             || !(0.0..=30.0).contains(&config.household_max_event_skew_seconds)
             || !matches!(config.ac_generation_sign, -1..=1)
@@ -128,6 +177,14 @@ impl HaConfig {
             "activePower": self.active_power, "dcPower": self.dc_power,
             "inverterStaleSeconds": self.inverter_stale_seconds,
             "gridSkewSeconds": self.grid_skew_seconds,
+            "currentDemand": self.current_demand,
+            "monthlyPeak": self.monthly_peak,
+            "energyImportTariff1": self.energy_import_tariff1,
+            "energyImportTariff2": self.energy_import_tariff2,
+            "energyExportTariff1": self.energy_export_tariff1,
+            "energyExportTariff2": self.energy_export_tariff2,
+            "meterDataStaleSeconds": self.meter_data_stale_seconds,
+            "meterDataMaxEventSkewSeconds": self.meter_data_max_event_skew_seconds,
             "householdUse": {
                 "enabled": self.household_use_enabled,
                 "topology": self.household_topology,
@@ -136,11 +193,54 @@ impl HaConfig {
             }
         })
     }
+
+    fn entity_index(&self, id: &str) -> Option<usize> {
+        [
+            &self.grid_import,
+            &self.grid_export,
+            &self.active_power,
+            &self.dc_power,
+            &self.current_demand,
+            &self.monthly_peak,
+            &self.energy_import_tariff1,
+            &self.energy_import_tariff2,
+            &self.energy_export_tariff1,
+            &self.energy_export_tariff2,
+        ]
+        .iter()
+        .position(|entity| !entity.is_empty() && entity.as_str() == id)
+    }
+
+    fn entity_name(&self, index: usize) -> Option<&str> {
+        [
+            self.grid_import.as_str(),
+            self.grid_export.as_str(),
+            self.active_power.as_str(),
+            self.dc_power.as_str(),
+            self.current_demand.as_str(),
+            self.monthly_peak.as_str(),
+            self.energy_import_tariff1.as_str(),
+            self.energy_import_tariff2.as_str(),
+            self.energy_export_tariff1.as_str(),
+            self.energy_export_tariff2.as_str(),
+        ]
+        .get(index)
+        .copied()
+        .filter(|entity| !entity.is_empty())
+    }
+
+    fn relevant(&self, id: &str) -> bool {
+        (if self.atomic_grid.is_empty() {
+            id == self.grid_import || id == self.grid_export
+        } else {
+            id == self.atomic_grid
+        }) || self.entity_index(id).is_some_and(|index| index >= INVERTER_AC)
+    }
 }
 
 #[derive(Clone)]
 struct Sample {
-    watts: f64,
+    value: f64,
     at: i64,
     reported_at: i64,
     received: Instant,
@@ -184,6 +284,42 @@ fn utc_timestamp(text: &str) -> Result<i64, &'static str> {
         return Err("ha-atomic-time");
     }
     Ok(time.timestamp_millis())
+}
+
+#[derive(Clone, Copy)]
+struct BelgianCalendar {
+    month: i64,
+    day: i64,
+    minute: i64,
+    offset_minutes: i64,
+}
+
+fn last_sunday(year: i64, month: u32) -> i64 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let last_day = days_from_civil(next_year, next_month, 1) - 1;
+    last_day - (last_day + 4).rem_euclid(7)
+}
+
+fn belgian_meter_calendar(utc_ms: i64) -> Option<BelgianCalendar> {
+    let utc_seconds = utc_ms.div_euclid(1000);
+    let (year, _, _) = civil_from_days(utc_seconds.div_euclid(86_400));
+    if !(2000..=9998).contains(&year) {
+        return None;
+    }
+    // Belgium follows the EU rule: UTC+2 from 01:00 UTC on the last Sunday
+    // in March until 01:00 UTC on the last Sunday in October.
+    let summer_start_seconds = last_sunday(year, 3) * 86_400 + 3600;
+    let summer_end_seconds = last_sunday(year, 10) * 86_400 + 3600;
+    let offset_minutes = if (summer_start_seconds..summer_end_seconds).contains(&utc_seconds) { 120 } else { 60 };
+    let local_seconds = utc_seconds + offset_minutes * 60;
+    let local_day = local_seconds.div_euclid(86_400);
+    let (local_year, month, _) = civil_from_days(local_day);
+    Some(BelgianCalendar {
+        month: local_year * 100 + month as i64,
+        day: local_day,
+        minute: local_seconds.rem_euclid(86_400) / 60,
+        offset_minutes,
+    })
 }
 
 fn atomic_payload(value: &Value, now: i64) -> Result<AtomicPayload, &'static str> {
@@ -415,6 +551,10 @@ pub struct HaDiagnostics {
     pub household_use_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub household_use_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_forecast_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_energy_issue: Option<String>,
 }
 
 #[derive(Clone)]
@@ -427,12 +567,12 @@ struct Observation {
 
 pub struct HaState {
     config: HaConfig,
-    samples: [Option<Sample>; 4],
+    samples: [Option<Sample>; SAMPLE_COUNT],
     // High-water marks survive removal/reconnect so replay cannot renew old samples.
-    history: [Option<Sample>; 4],
-    observations: [Option<Observation>; 4],
-    issues: [Option<String>; 4],
-    live_changes: [bool; 4],
+    history: [Option<Sample>; SAMPLE_COUNT],
+    observations: [Option<Observation>; SAMPLE_COUNT],
+    issues: [Option<String>; SAMPLE_COUNT],
+    live_changes: [bool; SAMPLE_COUNT],
     atomic: AtomicGrid,
     pub stats: MeterStats,
     ready: bool,
@@ -442,11 +582,11 @@ impl HaState {
     pub fn new(config: HaConfig) -> Self {
         Self {
             config,
-            samples: [None, None, None, None],
-            history: [None, None, None, None],
-            observations: [None, None, None, None],
-            issues: [None, None, None, None],
-            live_changes: [false; 4],
+            samples: std::array::from_fn(|_| None),
+            history: std::array::from_fn(|_| None),
+            observations: std::array::from_fn(|_| None),
+            issues: std::array::from_fn(|_| None),
+            live_changes: [false; SAMPLE_COUNT],
             atomic: AtomicGrid::default(),
             stats: MeterStats::default(),
             ready: false,
@@ -556,14 +696,7 @@ fn run_authenticated_session(
     let mut pending_ping_id = None;
     let mut buffered: Vec<(String, Value)> = Vec::new();
     let mut buffered_bytes = 0;
-    let relevant = |id: &str| {
-        (if config.atomic_grid.is_empty() {
-            id == config.grid_import || id == config.grid_export
-        } else {
-            id == config.atomic_grid
-        }) || (!config.active_power.is_empty() && id == config.active_power)
-            || (!config.dc_power.is_empty() && id == config.dc_power)
-    };
+    let relevant = |id: &str| config.relevant(id);
     while !stop.load(Ordering::Relaxed) {
         if (phase < 4 && Instant::now() >= deadline)
             || ping_deadline.is_some_and(|d| Instant::now() >= d)
@@ -719,17 +852,129 @@ pub(crate) fn worker(runtime: &Mutex<Runtime>, stop: &AtomicBool, config: &HaCon
 }
 
 impl HaState {
+    fn feature_issue(&self, now: i64, required: &[usize], require_same_day: bool) -> Option<&'static str> {
+        if !self.stats.connected || !self.ready {
+            return Some("ha-meter-data-disconnected");
+        }
+        if self.config.atomic_grid.is_empty() {
+            return Some("ha-meter-data-needs-atomic-grid");
+        }
+        if !self.atomic.issue(now, 30.0).is_empty() {
+            return Some("ha-meter-data-grid-unavailable");
+        }
+        let Some(grid) = self.atomic.sample.as_ref() else {
+            return Some("ha-meter-data-grid-unavailable");
+        };
+        let Some(calendar) = belgian_meter_calendar(grid.payload.meter_at) else {
+            return Some("ha-meter-clock-unsupported");
+        };
+        for &index in required {
+            if self.config.entity_name(index).is_none() {
+                return Some("ha-meter-data-not-mapped");
+            }
+            if self.issues[index].is_some() {
+                return Some("ha-meter-data-invalid");
+            }
+            if !self.live_changes[index] {
+                return Some("ha-meter-data-awaiting-live-change");
+            }
+            let Some(sample) = self.samples[index].as_ref() else {
+                return Some("ha-meter-data-unavailable");
+            };
+            if now < sample.at || sample.age(now) as f64 > self.config.meter_data_stale_seconds * 1000.0 {
+                return Some("ha-meter-data-stale");
+            }
+            if sample.at.abs_diff(grid.payload.publisher_at) as f64
+                > self.config.meter_data_max_event_skew_seconds * 1000.0
+            {
+                return Some("ha-meter-data-event-proximity");
+            }
+            if let Some(sample_calendar) = belgian_meter_calendar(sample.at) {
+                if index == MONTHLY_PEAK && sample_calendar.month != calendar.month {
+                    return Some("ha-meter-data-month-boundary");
+                }
+                if require_same_day && sample_calendar.day != calendar.day {
+                    return Some("ha-meter-data-day-boundary");
+                }
+            } else {
+                return Some("ha-meter-clock-unsupported");
+            }
+        }
+        None
+    }
+
+    /// Adds optional HA meter values only when each live state-change event is
+    /// bounded in age and close to this atomic callback. This is not a same-
+    /// telegram guarantee; it is an explicitly provisional event-proximity gate.
+    pub fn enrich_reading(&self, reading: &mut Reading, now: i64) {
+        if reading.source != "home-assistant-atomic" {
+            return;
+        }
+        let Some(calendar) = belgian_meter_calendar(reading.timestamp) else {
+            return;
+        };
+        reading.meter_time = Some(reading.timestamp);
+        reading.meter_month = Some(calendar.month);
+        reading.meter_day = Some(calendar.day);
+        reading.meter_minute_of_day = Some(calendar.minute);
+        reading.meter_offset_minutes = Some(calendar.offset_minutes);
+
+        if self.feature_issue(now, &[CURRENT_DEMAND], false).is_none() {
+            reading.current_demand_w = self.samples[CURRENT_DEMAND].as_ref().map(|sample| sample.value);
+        }
+        if self.feature_issue(now, &[MONTHLY_PEAK], false).is_none() {
+            reading.monthly_peak_w = self.samples[MONTHLY_PEAK].as_ref().map(|sample| sample.value);
+            reading.monthly_peak_month = Some(calendar.month);
+        }
+        if self
+            .feature_issue(
+                now,
+                &[ENERGY_IMPORT_TARIFF_1, ENERGY_IMPORT_TARIFF_2, ENERGY_EXPORT_TARIFF_1, ENERGY_EXPORT_TARIFF_2],
+                true,
+            )
+            .is_none()
+        {
+            let value = |index: usize| self.samples[index].as_ref().map(|sample| sample.value as i64);
+            if let (
+                Some(import_tariff1_wh),
+                Some(import_tariff2_wh),
+                Some(export_tariff1_wh),
+                Some(export_tariff2_wh),
+            ) = (
+                value(ENERGY_IMPORT_TARIFF_1),
+                value(ENERGY_IMPORT_TARIFF_2),
+                value(ENERGY_EXPORT_TARIFF_1),
+                value(ENERGY_EXPORT_TARIFF_2),
+            ) {
+                reading.energy_totals_wh =
+                    Some(EnergyTotals { import_tariff1_wh, import_tariff2_wh, export_tariff1_wh, export_tariff2_wh });
+            }
+        }
+    }
+
+    pub fn peak_data_issue(&self, now: i64) -> Option<&'static str> {
+        self.feature_issue(now, &[CURRENT_DEMAND, MONTHLY_PEAK], false)
+    }
+
+    pub fn daily_data_issue(&self, now: i64) -> Option<&'static str> {
+        self.feature_issue(
+            now,
+            &[ENERGY_IMPORT_TARIFF_1, ENERGY_IMPORT_TARIFF_2, ENERGY_EXPORT_TARIFF_1, ENERGY_EXPORT_TARIFF_2],
+            true,
+        )
+    }
+
     pub fn diagnostics(&self, now: i64, meter_stale_seconds: f64) -> HaDiagnostics {
         let mut ids = if self.config.atomic_grid.is_empty() {
-            vec![(&self.config.grid_import, Some(0)), (&self.config.grid_export, Some(1))]
+            vec![
+                (self.config.grid_import.as_str(), Some(GRID_IMPORT)),
+                (self.config.grid_export.as_str(), Some(GRID_EXPORT)),
+            ]
         } else {
-            vec![(&self.config.atomic_grid, None)]
+            vec![(self.config.atomic_grid.as_str(), None)]
         };
         ids.extend(
-            [(&self.config.active_power, 2), (&self.config.dc_power, 3)]
-                .into_iter()
-                .filter(|(id, _)| !id.is_empty())
-                .map(|(id, index)| (id, Some(index))),
+            (INVERTER_AC..SAMPLE_COUNT).filter_map(|index| self.config.entity_name(index).map(|id| (id, Some(index)))),
         );
         HaDiagnostics {
             connected: self.stats.connected,
@@ -744,17 +989,19 @@ impl HaState {
             dc_power_entity: (!self.config.dc_power.is_empty()).then(|| self.config.dc_power.clone()),
             household_use_enabled: self.config.household_use_enabled,
             household_use_issue: self.household_use_value(now, meter_stale_seconds).err().map(str::to_string),
+            peak_forecast_issue: self.peak_data_issue(now).map(str::to_string),
+            daily_energy_issue: self.daily_data_issue(now).map(str::to_string),
             entities: ids
                 .iter()
                 .map(|(id, index)| {
                     if index.is_none() {
-                        return self.atomic.diagnostic((*id).clone(), now, meter_stale_seconds);
+                        return self.atomic.diagnostic((*id).to_string(), now, meter_stale_seconds);
                     }
                     let i = index.unwrap();
                     let o = self.observations[i].as_ref();
                     let s = self.samples[i].as_ref();
                     EntityDiagnostic {
-                        entity: (*id).clone(),
+                        entity: (*id).to_string(),
                         ha_last_changed: o.and_then(|o| o.changed),
                         ha_last_updated: o.and_then(|o| o.updated),
                         ha_last_reported: o.and_then(|o| o.reported),
@@ -762,15 +1009,21 @@ impl HaState {
                         evidence_at: s.map(|s| s.at),
                         age_ms: s.map(|s| s.age(now)),
                         issue: self.issues[i].clone().or_else(|| {
-                            let limit = if i < 2 { meter_stale_seconds } else { self.config.inverter_stale_seconds };
+                            let limit = match i {
+                                GRID_IMPORT | GRID_EXPORT => meter_stale_seconds,
+                                INVERTER_AC | INVERTER_DC => self.config.inverter_stale_seconds,
+                                _ => self.config.meter_data_stale_seconds,
+                            };
                             if !self.stats.connected {
                                 Some("ha-disconnected".into())
                             } else if s.is_none() {
                                 Some("ha-entity-unavailable".into())
                             } else if s.is_some_and(|s| now < s.at || s.age(now) as f64 > limit * 1000.0) {
                                 Some("ha-entity-stale".into())
-                            } else if i < 2 && !self.live_changes[i] {
+                            } else if i < INVERTER_AC && !self.live_changes[i] {
                                 Some("ha-awaiting-new-grid-evidence".into())
+                            } else if i >= CURRENT_DEMAND && !self.live_changes[i] {
+                                Some("ha-awaiting-live-meter-value-change".into())
                             } else {
                                 None
                             }
@@ -786,8 +1039,8 @@ impl HaState {
 
     pub fn disconnect(&mut self, issue: &str) {
         self.atomic.invalidate(issue);
-        self.samples = [None, None, None, None];
-        self.live_changes = [false; 4];
+        self.samples = std::array::from_fn(|_| None);
+        self.live_changes = [false; SAMPLE_COUNT];
         self.ready = false;
         self.stats.connected = false;
         self.stats.errors += 1;
@@ -804,12 +1057,7 @@ impl HaState {
     }
 
     pub fn relevant(&self, id: &str) -> bool {
-        (if self.config.atomic_grid.is_empty() {
-            id == self.config.grid_import || id == self.config.grid_export
-        } else {
-            id == self.config.atomic_grid
-        }) || (!self.config.active_power.is_empty() && id == self.config.active_power)
-            || (!self.config.dc_power.is_empty() && id == self.config.dc_power)
+        self.config.relevant(id)
     }
 
     pub fn state(&mut self, id: &str, value: &Value, now: i64) {
@@ -829,21 +1077,11 @@ impl HaState {
                 }
                 return;
             }
-            if id != self.config.active_power && id != self.config.dc_power {
+            if self.config.entity_index(id).is_none_or(|index| index < INVERTER_AC) {
                 return;
             }
         }
-        let index = if id == self.config.grid_import {
-            0
-        } else if id == self.config.grid_export {
-            1
-        } else if !self.config.active_power.is_empty() && id == self.config.active_power {
-            2
-        } else if !self.config.dc_power.is_empty() && id == self.config.dc_power {
-            3
-        } else {
-            return;
-        };
+        let Some(index) = self.config.entity_index(id) else { return };
         let stamp = |name: &str| {
             value[name]
                 .as_str()
@@ -861,19 +1099,34 @@ impl HaState {
             if matches!(state, "unavailable" | "unknown") {
                 return Err("ha-entity-unavailable");
             }
-            let watts = state.parse::<f64>().map_err(|_| "ha-invalid-power")?;
+            let raw = state.parse::<f64>().map_err(|_| "ha-invalid-meter-value")?;
             let unit = value["attributes"]["unit_of_measurement"].as_str().ok_or("ha-unit")?;
-            if unit != if index < 2 { "kW" } else { "W" } {
-                return Err("ha-unit");
-            }
-            let watts = watts * if index < 2 { 1000.0 } else { 1.0 };
-            let valid_power = if index == 2 {
-                (-1_000_000.0..=1_000_000.0).contains(&watts)
-            } else {
-                (0.0..=1_000_000.0).contains(&watts)
+            let normalized = match index {
+                GRID_IMPORT | GRID_EXPORT | CURRENT_DEMAND | MONTHLY_PEAK if unit == "kW" => raw * 1000.0,
+                INVERTER_AC if unit == "W" => raw,
+                INVERTER_DC if unit == "W" => raw,
+                ENERGY_IMPORT_TARIFF_1..=ENERGY_EXPORT_TARIFF_2 if unit == "kWh" => {
+                    if value["attributes"]["state_class"] != "total_increasing"
+                        || value["attributes"]["device_class"] != "energy"
+                    {
+                        return Err("ha-counter-class");
+                    }
+                    let wh = raw * 1000.0;
+                    let rounded = wh.round();
+                    if (wh - rounded).abs() > 0.000_001 {
+                        return Err("ha-counter-precision");
+                    }
+                    rounded
+                }
+                _ => return Err("ha-unit"),
             };
-            if !watts.is_finite() || !valid_power {
-                return Err("ha-invalid-power");
+            let valid_value = match index {
+                INVERTER_AC => (-1_000_000.0..=1_000_000.0).contains(&normalized),
+                ENERGY_IMPORT_TARIFF_1..=ENERGY_EXPORT_TARIFF_2 => (0.0..=999_999_999.0).contains(&normalized),
+                _ => (0.0..=1_000_000.0).contains(&normalized),
+            };
+            if !raw.is_finite() || !normalized.is_finite() || !valid_value {
+                return Err("ha-invalid-meter-value");
             }
             let at = chrono::DateTime::parse_from_rfc3339(value["last_changed"].as_str().ok_or("ha-timestamp")?)
                 .map_err(|_| "ha-timestamp")?
@@ -889,14 +1142,14 @@ impl HaState {
                     }
                 }
             }
-            Ok(Sample { watts, at, reported_at: at, received: Instant::now(), age_at_receive: now - at })
+            Ok(Sample { value: normalized, at, reported_at: at, received: Instant::now(), age_at_receive: now - at })
         })();
         match parsed {
             Ok(mut sample) => {
-                let changed = self.history[index].as_ref().is_none_or(|old| old.watts != sample.watts);
+                let changed = self.history[index].as_ref().is_none_or(|old| old.value != sample.value);
                 if let Some(old) = &self.history[index] {
                     if sample.reported_at < old.reported_at
-                        || (sample.reported_at == old.reported_at && sample.watts != old.watts)
+                        || (sample.reported_at == old.reported_at && sample.value != old.value)
                     {
                         self.samples[index] = None;
                         self.live_changes[index] = false;
@@ -907,7 +1160,7 @@ impl HaState {
                         }
                         return;
                     }
-                    if sample.watts == old.watts {
+                    if sample.value == old.value {
                         sample.at = old.at;
                         sample.received = old.received;
                         sample.age_at_receive = old.age_at_receive;
@@ -967,7 +1220,7 @@ impl HaState {
             }
             // A changed member advances the coherent pair; each member's age is
             // independently checked above, so this cannot conceal an old zero.
-            Ok(Reading::new(import.at.max(export.at), import.watts, export.watts, "home-assistant"))
+            Ok(Reading::new(import.at.max(export.at), import.value, export.value, "home-assistant"))
         })();
         match result {
             Ok(reading) => {
@@ -999,8 +1252,8 @@ impl HaState {
         };
         let ac = self.samples[2].as_ref().filter(|s| is_fresh(s));
         let dc = self.samples[3].as_ref().filter(|s| is_fresh(s));
-        let active_power_w = ac.map(|s| s.watts);
-        let pv_power_w = dc.map(|s| s.watts);
+        let active_power_w = ac.map(|s| s.value);
+        let pv_power_w = dc.map(|s| s.value);
         if active_power_w.is_none() && pv_power_w.is_none() {
             return InverterSnapshot::without_reading(
                 InverterStatus::Offline,
@@ -1056,7 +1309,7 @@ impl HaState {
 
     fn household_use_from_inputs(&self, grid: &AtomicSample, ac: &Sample) -> Result<f64, &'static str> {
         let watts =
-            grid.payload.import_w - grid.payload.export_w + ac.watts * f64::from(self.config.ac_generation_sign);
+            grid.payload.import_w - grid.payload.export_w + ac.value * f64::from(self.config.ac_generation_sign);
         if !watts.is_finite() || watts < 0.0 {
             return Err("ha-household-out-of-range");
         }
@@ -1099,6 +1352,27 @@ mod heartbeat_tests {
     use crate::SolarConfig;
     use std::net::TcpListener;
     use std::sync::Arc;
+
+    #[test]
+    fn atomic_utc_meter_clock_uses_brussels_local_day_month_and_dst_transitions() {
+        let before_spring = belgian_meter_calendar(crate::utc_ms(2027, 3, 28, 0, 59, 0)).unwrap();
+        let after_spring = belgian_meter_calendar(crate::utc_ms(2027, 3, 28, 1, 0, 0)).unwrap();
+        assert_eq!(before_spring.offset_minutes, 60);
+        assert_eq!(before_spring.minute, 119);
+        assert_eq!(after_spring.offset_minutes, 120);
+        assert_eq!(after_spring.minute, 180);
+
+        let before_autumn = belgian_meter_calendar(crate::utc_ms(2027, 10, 31, 0, 59, 0)).unwrap();
+        let after_autumn = belgian_meter_calendar(crate::utc_ms(2027, 10, 31, 1, 0, 0)).unwrap();
+        assert_eq!(before_autumn.offset_minutes, 120);
+        assert_eq!(before_autumn.minute, 179);
+        assert_eq!(after_autumn.offset_minutes, 60);
+        assert_eq!(after_autumn.minute, 120);
+
+        let new_year = belgian_meter_calendar(crate::utc_ms(2026, 12, 31, 23, 30, 0)).unwrap();
+        assert_eq!(new_year.month, 202701);
+        assert_eq!(new_year.minute, 30);
+    }
 
     fn write(ws: &mut WebSocket<TcpStream>, value: Value) {
         ws.send(Message::Text(value.to_string().into())).unwrap();

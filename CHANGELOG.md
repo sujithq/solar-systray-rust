@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last-known state-change age; neither can renew grid freshness. A separate
   household-use estimate remains disabled unless explicitly configured with a
   supported topology, AC generation sign, and bounded HA-event proximity.
+- HA quarter-hour peak forecasting and partial daily-energy monitoring from
+  separately mapped demand, current-month peak and total-increasing tariff
+  counters. Optional states require live value changes within independent
+  90-second age and 30-second event-proximity bounds; the UI labels this
+  provisional evidence, uses the atomic UTC meter clock with Brussels DST rules,
+  and reports partial-day baselines. Optional data never affects grid/GO; true
+  same-telegram parity still requires extending the atomic publisher schema.
 - Isolated native HA monitoring via an existing absolute
   `SOLAR_SYSTRAY_HA_CONFIG` file, with HA-only atomic startup/reload validation,
   no primary settings seeding and no autostart changes.

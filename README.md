@@ -125,6 +125,14 @@ Merge these sections into the `solar` object of your existing config:
     "dcPower": "sensor.sg5_0rs_local_total_dc_power",
     "inverterStaleSeconds": 90,
     "gridSkewSeconds": 5,
+    "currentDemand": "sensor.electricity_meter_current_average_demand",
+    "monthlyPeak": "sensor.electricity_meter_maximum_demand_current_month",
+    "energyImportTariff1": "sensor.electricity_meter_energy_consumption_tarif_1",
+    "energyImportTariff2": "sensor.electricity_meter_energy_consumption_tarif_2",
+    "energyExportTariff1": "sensor.electricity_meter_energy_production_tarif_1",
+    "energyExportTariff2": "sensor.electricity_meter_energy_production_tarif_2",
+    "meterDataStaleSeconds": 90,
+    "meterDataMaxEventSkewSeconds": 30,
     "householdUse": {
       "enabled": false,
       "topology": "",
@@ -203,6 +211,58 @@ remains the user working assumption, not verified physical calibration. Do not t
 built-in DSMR timestamp into a freshness signal: it can precede power updates or
 come from a telegram missing required powers. Timestamp-only signals, arbitrary
 debounce and heartbeat/report times do not establish an atomic sample.
+
+#### Provisional HA demand, peak and daily-energy features
+
+The optional `currentDemand` and `monthlyPeak` mappings expect **kW** and are
+converted to watts. The four `energy*Tariff*` mappings expect **kWh** and require
+HA `device_class: energy` and `state_class: total_increasing`; they are converted
+to whole watt-hours. The mapping defaults use the sensor IDs shown in the example
+above. Any mapping may be set to `""` to disable it. `meterDataStaleSeconds`
+(default **90 s**, configurable 1-86400) and
+`meterDataMaxEventSkewSeconds` (default **30 s**, configurable 0-30) apply
+independently of the 30-second grid and 90-second inverter limits.
+
+The clock comes only from `atomicGrid.meter_timestamp` in UTC. The client
+converts it to **Europe/Brussels** meter-local date, month, minute and CET/CEST
+offset using the EU DST transition rules; it never uses the PC's timezone or
+the separate HA timestamp entity. Quarter calculations use the same meter
+instant. The `monthlyPeak` mapping is specifically the current-month peak;
+the client associates it with the atomic meter's local month and rejects a
+peak event from another month.
+
+These six values are separate HA entities, not part of the publisher's atomic
+grid payload. To avoid silently combining cached states as if they were one
+telegram, each required value must have a genuine live `last_changed` value
+change after connection, be within `meterDataStaleSeconds`, and have its
+`last_changed` event within `meterDataMaxEventSkewSeconds` of the atomic
+`received_at` event. For daily counters, the event must also be on the same
+Brussels meter-local day. This is only a bounded **HA event-proximity** gate;
+it does not prove a same-telegram read or simultaneous physical acquisition.
+Snapshots, equal values, `last_updated`, `last_reported`, unrelated entities,
+heartbeats and connectivity do not refresh optional data. After reconnect, new
+live changes are required again. Event-driven monthly peaks and unchanged tariff
+counters can therefore leave these features unavailable; the tray reports the
+specific missing, stale, invalid, month/day-boundary or proximity gate rather
+than relaxing it. Optional-data failure never changes atomic grid freshness or
+GO eligibility.
+
+The quarter-hour engine uses the atomic grid import, validated current-demand
+and current-month-peak states, and the meter clock. Daily energy reuses the
+existing counter-delta engine. Its baseline begins at the first qualifying
+sample observed during this run, so **Today** is explicitly marked partial and
+shows the meter-local start time; it is not represented as a midnight-to-now
+total. A decreasing/reset counter invalidates the result until the next local
+meter day, while a day or month boundary is evaluated in Brussels time,
+including DST. No inverter yield or instantaneous-power estimate substitutes
+for tariff counters.
+
+For decision-grade parity rather than this provisional event-proximity display,
+the acquisition-side atomic publisher would need to include validated
+same-telegram current demand, current-month peak plus its month identity, and
+all four cumulative tariff counters under the same advancing sequence and
+timestamps (or publish an equivalently correlated schema). This client does not
+assume those fields exist today.
 
 #### Conservative separate-entity mode
 
@@ -310,10 +370,10 @@ physical freshness are not verified. This slice does **not** map Sungrow yield
 counters or treat connectivity as inverter-data freshness. Household use remains
 off unless its explicit topology/sign and freshness/event-proximity gates are
 configured; enabling them does not establish physical validation. Daily energy
-and quarter-hour demand/monthly-peak/forecast features remain explicitly
-unavailable until full meter calendar/timezone fields, counters,
-demand and peak mappings are established. No instantaneous-power or inverter-yield
-approximation substitutes for them.
+and quarter-hour forecast can use mapped HA sensors only through the provisional
+event-proximity gates above; those separate HA values are not yet part of the
+atomic publisher schema and can remain unavailable. No instantaneous-power or
+inverter-yield approximation substitutes for them.
 
 Provider grid-freshness monitoring and a user-observed native grid/error/recovery
 smoke have passed. Optional AC/DC display with these mappings still needs live

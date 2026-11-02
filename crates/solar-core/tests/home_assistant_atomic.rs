@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use solar_core::decision::State;
 use solar_core::home_assistant::HaState;
-use solar_core::present::solar_info;
+use solar_core::present::{solar_info, tooltip};
 use solar_core::{Runtime, SolarConfig, SolarService};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
@@ -14,6 +14,12 @@ use tungstenite::{Message, WebSocket};
 const GRID: &str = "sensor.dsmr_atomic_grid_sample";
 const AC: &str = "sensor.sg5_0rs_local_total_active_power";
 const DC: &str = "sensor.sg5_0rs_local_total_dc_power";
+const DEMAND: &str = "sensor.electricity_meter_current_average_demand";
+const PEAK: &str = "sensor.electricity_meter_maximum_demand_current_month";
+const IMPORT_1: &str = "sensor.electricity_meter_energy_consumption_tarif_1";
+const IMPORT_2: &str = "sensor.electricity_meter_energy_consumption_tarif_2";
+const EXPORT_1: &str = "sensor.electricity_meter_energy_production_tarif_1";
+const EXPORT_2: &str = "sensor.electricity_meter_energy_production_tarif_2";
 const AT: i64 = 1_800_000_000_000;
 
 fn iso(at: i64) -> String {
@@ -33,6 +39,18 @@ fn sample(session: &str, sequence: u64, at: i64, import_w: f64, export_w: f64) -
         "last_changed":iso(at),"last_updated":iso(at),"last_reported":iso(at),
         "attributes":{"schema_version":1,"session":session,"sample_sequence":sequence,
             "meter_timestamp":iso(at),"received_at":iso(at),"import_w":import_w,"export_w":export_w}})
+}
+
+fn meter_value(id: &str, value: &str, unit: &str, at: i64) -> Value {
+    let mut attributes = json!({"unit_of_measurement":unit});
+    if matches!(id, IMPORT_1 | IMPORT_2 | EXPORT_1 | EXPORT_2) {
+        attributes["device_class"] = json!("energy");
+        attributes["state_class"] = json!("total_increasing");
+    }
+    json!({
+        "entity_id":id,"state":value,"last_changed":iso(at),
+        "last_updated":iso(at),"last_reported":iso(at),"attributes":attributes
+    })
 }
 
 fn online() -> HaState {
@@ -55,6 +73,14 @@ fn atomic_mapping_is_explicit_configurable_and_never_falls_back_to_paired_entiti
     assert_eq!(config.decision.stale_after_seconds, 30.0);
     assert_eq!(config.decision.stable_duration_seconds, 300.0);
     assert_eq!(config.home_assistant.inverter_stale_seconds, 90.0);
+    assert_eq!(config.home_assistant.current_demand, DEMAND);
+    assert_eq!(config.home_assistant.monthly_peak, PEAK);
+    assert_eq!(config.home_assistant.energy_import_tariff1, IMPORT_1);
+    assert_eq!(config.home_assistant.energy_import_tariff2, IMPORT_2);
+    assert_eq!(config.home_assistant.energy_export_tariff1, EXPORT_1);
+    assert_eq!(config.home_assistant.energy_export_tariff2, EXPORT_2);
+    assert_eq!(config.home_assistant.meter_data_stale_seconds, 90.0);
+    assert_eq!(config.home_assistant.meter_data_max_event_skew_seconds, 30.0);
     assert_eq!(SolarConfig::from_json(&config.to_json()).unwrap(), config);
     assert!(SolarConfig::default().home_assistant.atomic_grid.is_empty());
     for bad in [
@@ -87,6 +113,226 @@ fn atomic_mapping_is_explicit_configurable_and_never_falls_back_to_paired_entiti
     assert_eq!(state.grid(AT, 30.0).unwrap().grid_export_w, 3000.0, "payload powers are W, not kW");
     state.state(GRID, &json!({"state":"unavailable","attributes":{"schema_version":1}}), AT);
     assert!(state.grid(AT, 30.0).is_none());
+}
+
+#[test]
+fn live_proximate_meter_entities_feed_existing_peak_and_partial_day_engines() {
+    let config = SolarConfig::from_json(&json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"atomicGrid":GRID,"meterDataStaleSeconds":10}
+    }))
+    .unwrap();
+    let mut runtime = Runtime::new(config);
+    runtime.ha_connected();
+    runtime.ha_ready();
+    let at = AT + 5 * 60_000;
+    runtime.ha_state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        runtime.ha_state(id, &meter_value(id, value, unit, at), at);
+    }
+
+    let next_at = at + 1000;
+    runtime.ha_state(GRID, &sample("meter-features", 2, next_at, 800.0, 100.0), next_at);
+    let first = runtime.snapshot(next_at);
+    assert_eq!(first.evaluation.current_demand_w, Some(2000.0));
+    assert_eq!(first.evaluation.monthly_peak_w, Some(5000.0));
+    assert!(first.peak_forecast.available, "{:?}", first.peak_forecast.reason);
+    assert!(first.daily_energy.available);
+    assert_eq!(first.daily_energy.import_wh, Some(0));
+    assert_eq!(first.daily_energy.export_wh, Some(0));
+    assert_eq!(
+        solar_info(&first).section("Today").unwrap().value("Coverage"),
+        Some("Partial today; baseline starts during this run")
+    );
+    assert!(tooltip(&first).contains("Partial today in "));
+
+    let counter_at = at + 2000;
+    runtime.ha_state(IMPORT_1, &meter_value(IMPORT_1, "100.001", "kWh", counter_at), counter_at);
+    let partial = runtime.snapshot(counter_at);
+    assert_eq!(partial.daily_energy.import_wh, Some(1));
+    assert_eq!(partial.daily_energy.export_wh, Some(0));
+    assert_eq!(partial.daily_energy.since_minute, Some(9 * 60 + 4));
+
+    let stale_at = at + 11_000;
+    runtime.ha_state(GRID, &sample("meter-features", 3, stale_at, 800.0, 100.0), stale_at);
+    let stale = runtime.snapshot(stale_at);
+    assert!(stale.evaluation.state != State::Offline, "optional meter-data expiry cannot invalidate grid");
+    assert!(!stale.peak_forecast.available);
+    assert!(!stale.daily_energy.available);
+    assert_eq!(stale.home_assistant.as_ref().unwrap().daily_energy_issue.as_deref(), Some("ha-meter-data-stale"));
+}
+
+#[test]
+fn counter_decrease_invalidates_partial_totals_without_affecting_atomic_grid() {
+    let mut runtime = runtime();
+    let at = AT + 5 * 60_000;
+    runtime.ha_state(GRID, &sample("meter-features", 1, at, 800.0, 100.0), at);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        runtime.ha_state(id, &meter_value(id, value, unit, at), at);
+    }
+    assert!(runtime.snapshot(at).daily_energy.available);
+
+    let next_at = at + 1000;
+    runtime.ha_state(GRID, &sample("meter-features", 2, next_at, 800.0, 100.0), next_at);
+    runtime.ha_state(IMPORT_1, &meter_value(IMPORT_1, "99.999", "kWh", next_at), next_at);
+    let snapshot = runtime.snapshot(next_at);
+    assert!(!snapshot.daily_energy.available);
+    assert_eq!(snapshot.daily_energy.reason, "counter-decreased");
+    assert_ne!(snapshot.evaluation.state, State::Offline, "bad optional counters cannot invalidate grid");
+}
+
+#[test]
+fn optional_entities_crossing_brussels_day_or_month_boundary_fail_closed() {
+    let mut state = online();
+    let grid_time = chrono::DateTime::parse_from_rfc3339("2027-01-31T22:59:50Z").unwrap().timestamp_millis();
+    let next_day = grid_time + 15_000;
+    state.state(GRID, &sample("meter-features", 1, grid_time, 800.0, 100.0), grid_time);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        state.state(id, &meter_value(id, value, unit, grid_time), grid_time);
+    }
+    assert!(state.peak_data_issue(grid_time).is_none());
+    assert!(state.daily_data_issue(grid_time).is_none());
+
+    state.state(PEAK, &meter_value(PEAK, "5.1", "kW", next_day), next_day);
+    assert_eq!(state.peak_data_issue(next_day), Some("ha-meter-data-month-boundary"));
+    for (id, value, unit) in [
+        (IMPORT_1, "100.001", "kWh"),
+        (IMPORT_2, "50.001", "kWh"),
+        (EXPORT_1, "20.001", "kWh"),
+        (EXPORT_2, "10.001", "kWh"),
+    ] {
+        state.state(id, &meter_value(id, value, unit, next_day), next_day);
+    }
+    assert_eq!(state.daily_data_issue(next_day), Some("ha-meter-data-day-boundary"));
+    assert!(state.grid(next_day, 30.0).is_some(), "optional boundary mismatch cannot invalidate grid");
+}
+
+#[test]
+fn cached_optional_snapshots_and_equal_live_values_do_not_restore_features_after_reconnect() {
+    let mut state = online();
+    let at = AT + 5 * 60_000;
+    state.state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        state.state(id, &meter_value(id, value, unit, at), at);
+    }
+    assert!(state.daily_data_issue(at).is_none());
+    assert!(state.peak_data_issue(at).is_none());
+
+    state.disconnect("ha-read-or-protocol");
+    state.connected();
+    state.ready();
+    let reconnect_at = at + 1000;
+    state.snapshot_state(GRID, &sample("meter-features", 2, reconnect_at, 800.0, 100.0), reconnect_at);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        state.snapshot_state(id, &meter_value(id, value, unit, at), reconnect_at);
+    }
+    assert!(state.grid(reconnect_at, 30.0).is_none());
+
+    let live_at = reconnect_at + 1000;
+    state.state(GRID, &sample("meter-features", 3, live_at, 800.0, 100.0), live_at);
+    for (id, value, unit) in [
+        (DEMAND, "2.0", "kW"),
+        (PEAK, "5.0", "kW"),
+        (IMPORT_1, "100.000", "kWh"),
+        (IMPORT_2, "50.000", "kWh"),
+        (EXPORT_1, "20.000", "kWh"),
+        (EXPORT_2, "10.000", "kWh"),
+    ] {
+        state.state(id, &meter_value(id, value, unit, at), live_at);
+    }
+    assert_eq!(state.peak_data_issue(live_at), Some("ha-meter-data-awaiting-live-change"));
+    assert_eq!(state.daily_data_issue(live_at), Some("ha-meter-data-awaiting-live-change"));
+
+    for (id, value, unit) in [
+        (DEMAND, "2.1", "kW"),
+        (PEAK, "5.1", "kW"),
+        (IMPORT_1, "100.001", "kWh"),
+        (IMPORT_2, "50.001", "kWh"),
+        (EXPORT_1, "20.001", "kWh"),
+        (EXPORT_2, "10.001", "kWh"),
+    ] {
+        state.state(id, &meter_value(id, value, unit, live_at), live_at);
+    }
+    assert!(state.daily_data_issue(live_at).is_none());
+    assert!(state.peak_data_issue(live_at).is_none());
+}
+
+#[test]
+fn optional_meter_states_require_live_proximity_valid_units_and_counter_metadata() {
+    let mut state = online();
+    let at = AT + 5 * 60_000;
+    state.state(GRID, &sample("meter-features", 1, at - 1000, 800.0, 100.0), at);
+    state.state(DEMAND, &meter_value(DEMAND, "2.0", "kW", at), at);
+    state.state(PEAK, &meter_value(PEAK, "5.0", "kW", at), at);
+    for (id, value) in [(IMPORT_1, "100.000"), (IMPORT_2, "50.000"), (EXPORT_1, "20.000"), (EXPORT_2, "10.000")] {
+        state.state(id, &meter_value(id, value, "kWh", at), at);
+    }
+    let mut reading = state.grid(at, 30.0).unwrap();
+    state.enrich_reading(&mut reading, at);
+    assert_eq!(reading.current_demand_w, Some(2000.0));
+    assert_eq!(reading.monthly_peak_w, Some(5000.0));
+    assert_eq!(reading.meter_month, Some(202701));
+    assert_eq!(reading.meter_offset_minutes, Some(60));
+    assert_eq!(reading.meter_minute_of_day, Some(9 * 60 + 4));
+    assert!(reading.energy_totals_wh.is_some());
+    assert!(state.daily_data_issue(at).is_none());
+    assert!(state.peak_data_issue(at).is_none());
+
+    let too_far = at + 31_000;
+    state.state(GRID, &sample("meter-features", 2, too_far, 800.0, 100.0), too_far);
+    let mut reading = state.grid(too_far, 30.0).unwrap();
+    state.enrich_reading(&mut reading, too_far);
+    assert!(reading.current_demand_w.is_none());
+    assert!(reading.energy_totals_wh.is_none());
+    assert_eq!(state.daily_data_issue(too_far), Some("ha-meter-data-event-proximity"));
+
+    let bad_config = SolarConfig::from_json(&json!({
+        "energySource":{"type":"home-assistant"},
+        "homeAssistant":{"currentDemand":"sensor.invalid\nentity","meterDataStaleSeconds":90}
+    }));
+    assert!(bad_config.is_err());
+    let invalid_class = meter_value(IMPORT_1, "100.000", "kWh", at);
+    let mut invalid_class = invalid_class;
+    invalid_class["attributes"]["state_class"] = json!("measurement");
+    state.snapshot_state(IMPORT_1, &invalid_class, too_far);
+    state.state(GRID, &sample("meter-features", 3, too_far + 1000, 800.0, 100.0), too_far + 1000);
+    assert_eq!(state.daily_data_issue(too_far + 1000), Some("ha-meter-data-invalid"));
+    assert!(state.grid(too_far + 1000, 30.0).is_some());
 }
 
 #[test]

@@ -131,21 +131,25 @@ impl Runtime {
         if let Meter::HomeAssistant(state) = &mut self.meter {
             state.disconnect(issue);
             self.invalidate();
+            self.daily_energy.reset();
         }
     }
 
     pub fn ha_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
-        if let Meter::HomeAssistant(state) = &mut self.meter {
-            state.state(id, value, now);
-            let reset = state.take_atomic_reset();
-            let reading = state.grid(now, self.config.decision.stale_after_seconds);
-            if reset {
-                self.invalidate();
-            }
-            match reading {
-                Some(reading) => self.observe(&reading, now),
-                None => self.invalidate(),
-            }
+        let Meter::HomeAssistant(state) = &mut self.meter else { return };
+        state.state(id, value, now);
+        let reset = state.take_atomic_reset();
+        let mut reading = state.grid(now, self.config.decision.stale_after_seconds);
+        if let Some(reading) = &mut reading {
+            state.enrich_reading(reading, now);
+        }
+        if reset {
+            self.invalidate();
+            self.daily_energy.reset();
+        }
+        match reading {
+            Some(reading) => self.observe(&reading, now),
+            None => self.invalidate(),
         }
     }
 
@@ -315,15 +319,24 @@ impl Runtime {
     // ---- Snapshot and controls ----
 
     pub fn snapshot(&mut self, now: i64) -> Snapshot {
-        let reading = match &mut self.meter {
+        let mut reading = match &mut self.meter {
             Meter::Mock(mock) => mock.latest().cloned(),
-            Meter::HomeAssistant(state) => state.grid(now, self.config.decision.stale_after_seconds),
+            Meter::HomeAssistant(state) => {
+                let mut reading = state.grid(now, self.config.decision.stale_after_seconds);
+                if let Some(reading) = &mut reading {
+                    state.enrich_reading(reading, now);
+                }
+                reading
+            }
             Meter::SlimmeLezer(link) => {
                 let (reading, events) = link.latest(now);
                 self.dispatch(events, now);
                 reading
             }
         };
+        if let (Meter::HomeAssistant(_), Some(reading)) = (&self.meter, reading.as_mut()) {
+            self.daily_energy.update(Some(reading), true);
+        }
         let reading = reading.as_ref();
         let fresh = self.fresh(reading, now);
         let evaluation = self.evaluate(reading, now);
@@ -342,6 +355,17 @@ impl Runtime {
             (Some(state.baseline_w), state.learned, state.samples)
         };
         let peak_forecast = self.forecast(reading, now);
+        let home_assistant = match &self.meter {
+            Meter::HomeAssistant(state) => Some(state.diagnostics(now, self.config.decision.stale_after_seconds)),
+            _ => None,
+        };
+        let daily_energy = match &self.meter {
+            Meter::HomeAssistant(state) => state
+                .daily_data_issue(now)
+                .map(DailyEnergyResult::unavailable)
+                .unwrap_or_else(|| self.daily_energy.current(fresh)),
+            _ => self.daily_energy.current(fresh),
+        };
         let times = self.sun_times(now);
         let mock = self.mock();
         let diagnostics = match &self.meter {
@@ -356,7 +380,7 @@ impl Runtime {
         };
         Snapshot {
             peak_forecast,
-            daily_energy: self.daily_energy.current(fresh),
+            daily_energy,
             simulated: self.config.is_mock(),
             scenario: mock.map(|m| m.scenario().to_string()),
             simulated_w: mock.filter(|m| m.scenario() == "custom").and_then(MockProvider::watts),
@@ -366,10 +390,7 @@ impl Runtime {
             sunrise: times.sunrise,
             sunset: times.sunset,
             diagnostics,
-            home_assistant: match &self.meter {
-                Meter::HomeAssistant(state) => Some(state.diagnostics(now, self.config.decision.stale_after_seconds)),
-                _ => None,
-            },
+            home_assistant,
             meter_address: if self.config.is_ha() {
                 Some("Home Assistant".into())
             } else {

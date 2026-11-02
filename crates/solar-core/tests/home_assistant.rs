@@ -17,6 +17,7 @@ const IMPORT: &str = "sensor.electricity_meter_power_consumption";
 const EXPORT: &str = "sensor.electricity_meter_power_production";
 const AC: &str = "sensor.sg5_0rs_local_total_active_power";
 const DC: &str = "sensor.sg5_0rs_local_total_dc_power";
+const DEMAND: &str = "sensor.electricity_meter_current_average_demand";
 const AT: i64 = 1_800_000_000_000;
 
 fn config() -> SolarConfig {
@@ -102,6 +103,11 @@ fn validates_endpoint_references_entities_and_round_trip() {
         ("activePower", json!(IMPORT)),
         ("dcPower", json!(EXPORT)),
         ("dcPower", json!("sensor.bad\nvalue")),
+        ("currentDemand", json!("sensor.bad\nvalue")),
+        ("monthlyPeak", json!("sensor.bad\nvalue")),
+        ("energyImportTariff1", json!("sensor.bad\nvalue")),
+        ("meterDataStaleSeconds", json!(0)),
+        ("meterDataMaxEventSkewSeconds", json!(31)),
         ("gridSkewSeconds", json!(31)),
         ("inverterStaleSeconds", json!(0)),
     ] {
@@ -113,6 +119,12 @@ fn validates_endpoint_references_entities_and_round_trip() {
     assert!(
         SolarConfig::from_json(&json!({"energySource":{"type":"home-assistant"},
             "homeAssistant":{"activePower":AC,"dcPower":AC}}))
+        .is_err()
+    );
+    assert!(
+        SolarConfig::from_json(&json!({"homeAssistant":{
+            "currentDemand":DEMAND,"monthlyPeak":DEMAND
+        }}))
         .is_err()
     );
     assert!(SolarConfig::from_json(&json!({"homeAssistant":{"token":"secret"}})).is_err());
@@ -509,8 +521,8 @@ fn runtime_gates_partial_features_and_observes_transient_imports_between_ui_tick
     assert!(snapshot.evaluation.current_demand_w.is_none());
     assert!(snapshot.evaluation.monthly_peak_w.is_none());
     let info = solar_info(&snapshot);
-    assert!(info.section("Quarter-hour peak").unwrap().value("Forecast").unwrap().contains("not mapped"));
-    assert!(info.section("Today").unwrap().value("Daily energy").unwrap().contains("not mapped"));
+    assert!(info.section("Quarter-hour peak").unwrap().value("Forecast").unwrap().contains("no meter clock"));
+    assert!(info.section("Today").unwrap().value("Why").unwrap().contains("atomic meter sample is required"));
     runtime.ha_state(IMPORT, &entity(IMPORT, "0.001", "kW", AT + 2000), AT + 2000);
     runtime.ha_state(IMPORT, &entity(IMPORT, "0", "kW", AT + 3000), AT + 3000);
     runtime.ha_state(EXPORT, &entity(EXPORT, "2.9", "kW", AT + 3000), AT + 3000);

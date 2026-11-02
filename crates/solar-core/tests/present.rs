@@ -240,6 +240,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
             dc_power_entity: Some("sensor.sg5_0rs_local_total_dc_power".into()),
             household_use_enabled: false,
             household_use_issue: Some("ha-household-disabled".into()),
+            peak_forecast_issue: None,
+            daily_energy_issue: None,
         });
         s.inverter.status = InverterStatus::Online;
         s.inverter.active_power_w = Some(3517.0);
@@ -263,6 +265,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
                 dc_power_entity: Some("sensor.dc".into()),
                 household_use_enabled: false,
                 household_use_issue: Some("ha-household-disabled".into()),
+                peak_forecast_issue: None,
+                daily_energy_issue: None,
             });
             s.inverter.active_power_w = Some(3517.0);
             s.inverter.pv_power_w = Some(3577.0);
@@ -292,6 +296,8 @@ fn home_assistant_shows_distinct_configured_ac_and_dc_without_household_derivati
             dc_power_entity: None,
             household_use_enabled: false,
             household_use_issue: Some("ha-household-disabled".into()),
+            peak_forecast_issue: None,
+            daily_energy_issue: None,
         });
         s.inverter.status = InverterStatus::Offline;
         s.inverter.active_power_w = None;

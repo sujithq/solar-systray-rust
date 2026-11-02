@@ -71,6 +71,18 @@ pub fn forecast_reason_text(reason: &str) -> &'static str {
         "peak-reached" => "peak already reached",
         "implausible-demand" => "demand not as expected",
         "clock-jump" => "meter clock jumped",
+        "ha-meter-data-disconnected" => "Home Assistant disconnected",
+        "ha-meter-data-needs-atomic-grid" => "atomic meter clock required",
+        "ha-meter-data-grid-unavailable" => "atomic meter data unavailable",
+        "ha-meter-clock-unsupported" => "unsupported meter date",
+        "ha-meter-data-not-mapped" => "meter entity not mapped",
+        "ha-meter-data-invalid" => "invalid meter entity",
+        "ha-meter-data-awaiting-live-change" => "awaiting live meter value change",
+        "ha-meter-data-unavailable" => "meter entity unavailable",
+        "ha-meter-data-stale" => "meter entity state-change is stale",
+        "ha-meter-data-event-proximity" => "outside HA event-proximity window",
+        "ha-meter-data-month-boundary" => "peak belongs to another meter month",
+        "ha-meter-data-day-boundary" => "counter event belongs to another meter day",
         _ => "unavailable",
     }
 }
@@ -83,6 +95,17 @@ pub fn daily_reason_text(reason: &str) -> Option<&'static str> {
         "missing-or-invalid-totals" => "the meter sends no energy totals",
         "clock-discontinuity" => "the meter clock changed; totals restart tomorrow",
         "counter-decreased" => "a meter total went down; totals restart tomorrow",
+        "ha-meter-data-disconnected" => "Home Assistant is disconnected",
+        "ha-meter-data-needs-atomic-grid" => "an atomic meter sample is required",
+        "ha-meter-data-grid-unavailable" => "the atomic meter sample is unavailable",
+        "ha-meter-clock-unsupported" => "the meter timestamp is outside the supported calendar",
+        "ha-meter-data-not-mapped" => "one or more energy counters are not mapped",
+        "ha-meter-data-invalid" => "an energy counter is invalid",
+        "ha-meter-data-awaiting-live-change" => "waiting for live counter value changes",
+        "ha-meter-data-unavailable" => "an energy counter is unavailable",
+        "ha-meter-data-stale" => "an energy counter state-change is stale",
+        "ha-meter-data-event-proximity" => "counter events are outside the HA event-proximity window",
+        "ha-meter-data-day-boundary" => "counter event does not match the meter day",
         _ => return None,
     })
 }
@@ -266,16 +289,18 @@ fn household_unavailable(issue: Option<&str>) -> &'static str {
 }
 
 fn peak_rows(s: &Snapshot) -> Vec<Row> {
-    if s.home_assistant.is_some() {
-        return vec![row("Forecast", "Unavailable (HA meter clock/demand/peak not mapped)", Tone::Muted)];
-    }
     let e = &s.evaluation;
     let mut rows = Vec::new();
     if live(s)
-        && let (Some(demand), Some(peak)) = (e.current_demand_w, e.monthly_peak_w)
+        && let Some(demand) = e.current_demand_w
     {
         let tone = if e.monthly_peak_reached { Tone::Warn } else { Tone::Text };
         rows.push(row("Quarter-hour demand", kilowatts(demand), tone));
+    }
+    if live(s)
+        && let Some(peak) = e.monthly_peak_w
+    {
+        let tone = if e.monthly_peak_reached { Tone::Warn } else { Tone::Text };
         rows.push(row("Monthly peak", kilowatts(peak), tone));
     }
     let f = &s.peak_forecast;
@@ -310,16 +335,28 @@ fn peak_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn today_rows(s: &Snapshot) -> Vec<Row> {
-    if s.home_assistant.is_some() {
-        return vec![row("Daily energy", "Unavailable (HA meter clock/counters not mapped)", Tone::Muted)];
-    }
     let d = &s.daily_energy;
     match (live(s) && d.available, d.import_wh, d.export_wh, d.since_minute) {
-        (true, Some(import), Some(export), Some(since)) => vec![
-            row("Imported", kilowatt_hours(import), Tone::Text),
-            row("Exported", kilowatt_hours(export), Tone::Text),
-            row("Since", format!("{} (meter time)", minute_text(since)), Tone::Muted),
-        ],
+        (true, Some(import), Some(export), Some(since)) => {
+            let mut rows = Vec::new();
+            if s.home_assistant.is_some() {
+                rows.push(row("Coverage", "Partial today; baseline starts during this run", Tone::Warn));
+            }
+            rows.extend([
+                row("Imported", kilowatt_hours(import), Tone::Text),
+                row("Exported", kilowatt_hours(export), Tone::Text),
+                row(
+                    "Since",
+                    format!(
+                        "{} ({})",
+                        minute_text(since),
+                        if s.home_assistant.is_some() { "meter local time" } else { "meter time" }
+                    ),
+                    Tone::Muted,
+                ),
+            ]);
+            rows
+        }
         _ => {
             let mut rows = vec![row("Daily energy", "Unavailable", if live(s) { Tone::Warn } else { Tone::Muted })];
             if let Some(why) = daily_reason_text(&d.reason) {
@@ -345,8 +382,24 @@ fn connection_rows(s: &Snapshot) -> Vec<Row> {
             Tone::Muted,
         ));
         rows.push(row("Evidence", &ha.evidence, Tone::Warn));
+        rows.push(row(
+            "Meter calendar",
+            "Atomic UTC timestamp converted to Europe/Brussels local time (DST-aware)",
+            Tone::Muted,
+        ));
+        rows.push(row(
+            "Optional meter evidence",
+            "Live HA value-change events within bounded age/proximity; not same-telegram proof",
+            Tone::Warn,
+        ));
         if let Some(issue) = &s.diagnostics.last_issue {
             rows.push(row("Grid status", issue, Tone::Warn));
+        }
+        if let Some(issue) = &ha.peak_forecast_issue {
+            rows.push(row("Quarter-hour data", issue, Tone::Warn));
+        }
+        if let Some(issue) = &ha.daily_energy_issue {
+            rows.push(row("Daily energy data", issue, Tone::Warn));
         }
         for entity in &ha.entities {
             let value = entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
@@ -477,7 +530,8 @@ pub fn tooltip(s: &Snapshot) -> String {
         let d = &s.daily_energy;
         if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
             lines.push(format!(
-                "Today in {} / out {}",
+                "{} in {} / out {}",
+                if s.home_assistant.is_some() { "Partial today" } else { "Today" },
                 kilowatt_hours(import).trim_end_matches(" kWh"),
                 kilowatt_hours(export)
             ));

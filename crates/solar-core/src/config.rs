@@ -97,6 +97,13 @@ pub fn defaults() -> Value {
             "gridExport": "sensor.electricity_meter_power_production",
             "atomicGrid": "",
             "activePower": "", "dcPower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5,
+            "currentDemand": "sensor.electricity_meter_current_average_demand",
+            "monthlyPeak": "sensor.electricity_meter_maximum_demand_current_month",
+            "energyImportTariff1": "sensor.electricity_meter_energy_consumption_tarif_1",
+            "energyImportTariff2": "sensor.electricity_meter_energy_consumption_tarif_2",
+            "energyExportTariff1": "sensor.electricity_meter_energy_production_tarif_1",
+            "energyExportTariff2": "sensor.electricity_meter_energy_production_tarif_2",
+            "meterDataStaleSeconds": 90, "meterDataMaxEventSkewSeconds": 30,
             "householdUse": {
                 "enabled": false, "topology": "", "generationSign": 0, "maxEventSkewSeconds": 5
             }
