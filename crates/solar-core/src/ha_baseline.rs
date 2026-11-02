@@ -256,13 +256,42 @@ impl NightSamples {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NightCoverage {
+    pub window: NightWindow,
+    pub queried_through: i64,
+    pub total_minutes: usize,
+    pub valid_minutes: usize,
+    pub unavailable_intervals: usize,
+    pub unavailable_ms: u64,
+    pub source: String,
+    pub complete: bool,
+    pub issue: Option<String>,
+    pub persistence_issue: Option<String>,
+}
+
+impl NightCoverage {
+    pub(crate) fn save(&self, path: &Path) -> Result<(), &'static str> {
+        let bytes = serde_json::to_vec(self).map_err(|_| "reported-night-status-write")?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(|_| "reported-night-status-write")?;
+        std::fs::rename(temporary, path).map_err(|_| "reported-night-status-write")
+    }
+}
+
 /// Sample HA's reported held state at minute starts, not new physical readings.
 pub(crate) struct ReportedNightSamples {
     window: NightWindow,
     entity: String,
-    values: Vec<f64>,
-    held: Option<f64>,
+    values: BTreeMap<i64, f64>,
+    invalid_minutes: HashSet<i64>,
+    held: Option<Option<f64>>,
     through: i64,
+    cursor: f64,
+    unavailable_ms: f64,
+    unavailable_intervals: usize,
+    in_outage: bool,
     records: usize,
 }
 
@@ -276,7 +305,19 @@ impl ReportedNightSamples {
         {
             return Err("reported-night-window-or-mapping");
         }
-        Ok(Self { window, entity, values: Vec::new(), held: None, through: window.start, records: 0 })
+        Ok(Self {
+            window,
+            entity,
+            values: BTreeMap::new(),
+            invalid_minutes: HashSet::new(),
+            held: None,
+            through: window.start,
+            cursor: window.start as f64,
+            unavailable_ms: 0.0,
+            unavailable_intervals: 0,
+            in_outage: false,
+            records: 0,
+        })
     }
 
     pub(crate) fn append(&mut self, result: &Value, start: i64, end: i64) -> Result<(), &'static str> {
@@ -291,7 +332,6 @@ impl ReportedNightSamples {
         if rows.is_empty() || rows.len() > 10_000 {
             return Err("reported-night-missing-boundary");
         }
-        let mut next_minute = start;
         let mut previous_at = None;
         for (index, row) in rows.iter().enumerate() {
             self.records += 1;
@@ -303,46 +343,88 @@ impl ReportedNightSamples {
                 return Err("reported-night-time");
             }
             let state = row["s"].as_str().ok_or("reported-night-invalid-power")?;
-            if matches!(state, "unknown" | "unavailable") {
-                return Err("reported-night-unavailable-coverage");
-            }
-            let attributes = &row["a"];
-            // Only raw power is eligible, never cumulative energy or statistics.
-            if attributes["unit_of_measurement"] != "kW"
-                || attributes["device_class"] != "power"
-                || attributes["state_class"] != "measurement"
-            {
-                return Err("reported-night-unit-or-class");
-            }
-            let watts = state.parse::<f64>().map_err(|_| "reported-night-invalid-power")? * 1000.0;
-            if !watts.is_finite() || !(0.0..=1_000_000.0).contains(&watts) {
-                return Err("reported-night-invalid-power");
-            }
+            let value = if matches!(state, "unknown" | "unavailable") {
+                None
+            } else {
+                let attributes = &row["a"];
+                if attributes["unit_of_measurement"] != "kW"
+                    || attributes["device_class"] != "power"
+                    || attributes["state_class"] != "measurement"
+                {
+                    return Err("reported-night-unit-or-class");
+                }
+                let watts = state.parse::<f64>().map_err(|_| "reported-night-invalid-power")? * 1000.0;
+                if !watts.is_finite() || !(0.0..=1_000_000.0).contains(&watts) {
+                    return Err("reported-night-invalid-power");
+                }
+                Some(watts)
+            };
             if index == 0 {
                 if (at - start as f64).abs() > 0.01 {
                     return Err("reported-night-missing-boundary");
                 }
-                if self.held.is_some_and(|held| held != watts) {
+                if self.held.is_some_and(|held| held != value) {
                     return Err("reported-night-boundary-mismatch");
                 }
             } else {
-                while (next_minute as f64) < at {
-                    self.values.push(self.held.ok_or("reported-night-missing-boundary")?);
-                    next_minute += MINUTE;
-                }
+                self.consume(at)?;
             }
-            self.held = Some(watts);
+            self.held = Some(value);
             previous_at = Some(at);
         }
-        while next_minute < end {
-            self.values.push(self.held.ok_or("reported-night-missing-boundary")?);
-            next_minute += MINUTE;
-        }
+        self.consume(end as f64)?;
         self.through = end;
         Ok(())
     }
 
+    fn consume(&mut self, end: f64) -> Result<(), &'static str> {
+        if end <= self.cursor {
+            return Ok(());
+        }
+        let held = self.held.ok_or("reported-night-missing-boundary")?;
+        if held.is_none() {
+            if !self.in_outage {
+                self.unavailable_intervals += 1;
+            }
+            self.unavailable_ms += end - self.cursor;
+            self.in_outage = true;
+        } else {
+            self.in_outage = false;
+        }
+        let mut minute = (self.cursor.floor() as i64).div_euclid(MINUTE) * MINUTE;
+        while (minute as f64) < end {
+            if let Some(watts) = held {
+                if minute as f64 >= self.cursor {
+                    self.values.entry(minute).or_insert(watts);
+                }
+            } else {
+                self.invalid_minutes.insert(minute);
+            }
+            minute += MINUTE;
+        }
+        self.cursor = end;
+        Ok(())
+    }
+
+    pub(crate) fn coverage(&self, issue: Option<&str>) -> NightCoverage {
+        NightCoverage {
+            window: self.window,
+            queried_through: self.cursor.floor() as i64,
+            total_minutes: ((self.window.end - self.window.start) / MINUTE) as usize,
+            valid_minutes: self.values.keys().filter(|minute| !self.invalid_minutes.contains(minute)).count(),
+            unavailable_intervals: self.unavailable_intervals,
+            unavailable_ms: self.unavailable_ms.ceil() as u64,
+            source: "HA reported grid-import power; held state, not physical acquisition".into(),
+            complete: self.through == self.window.end,
+            issue: issue.map(String::from),
+            persistence_issue: None,
+        }
+    }
+
     pub(crate) fn finish(self, now: i64) -> Result<RecordedBaseline, &'static str> {
+        if self.unavailable_intervals > 0 {
+            return Err("reported-night-unavailable-coverage");
+        }
         if self.through != self.window.end
             || self.values.len() < MIN_NIGHT_SAMPLES
             || self.values.len() as i64 != (self.window.end - self.window.start) / MINUTE
@@ -352,7 +434,7 @@ impl ReportedNightSamples {
         Ok(RecordedBaseline {
             window: self.window,
             calculated_at: now,
-            watts: median(&self.values),
+            watts: median(&self.values.values().copied().collect::<Vec<_>>()),
             samples: self.values.len(),
             unit: "W".into(),
             provenance: REPORTED_PROVENANCE.into(),
@@ -393,7 +475,11 @@ pub(crate) fn worker(
                             baseline: status.baseline.clone(),
                             issue: Some(format!("reported-night-loading-after-{issue}")),
                         });
-                        crate::home_assistant::recorded_reported_night(config, stop, window)?
+                        let report_path = path.with_extension("night-coverage.json");
+                        crate::home_assistant::recorded_reported_night(config, stop, window, |mut coverage| {
+                            coverage.persistence_issue = coverage.save(&report_path).err().map(String::from);
+                            lock(runtime).set_night_coverage(coverage);
+                        })?
                     }
                     Err(issue) => return Err(issue),
                 };
@@ -487,7 +573,13 @@ mod tests {
                 _ => rows.as_array_mut().unwrap().push(reported_row(start as f64, "0.300")),
             }
             let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
-            assert!(samples.append(&json!({"sensor.grid":rows}), start, start + 15 * MINUTE).is_err(), "{fault}");
+            let result = samples.append(&json!({"sensor.grid":rows}), start, start + 15 * MINUTE);
+            if matches!(fault, "unknown" | "unavailable") {
+                result.unwrap();
+                assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
+            } else {
+                assert!(result.is_err(), "{fault}");
+            }
         }
         let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
         samples
@@ -497,6 +589,74 @@ mod tests {
         assert!(!reported_fallback_eligible("history-auth-rejected"));
         assert!(!reported_fallback_eligible("history-response-timeout"));
         assert!(reported_fallback_eligible("history-missing-acquisition"));
+    }
+
+    #[test]
+    fn coverage_counts_one_real_outage_across_held_chunk_boundary_without_filling_minutes() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[
+                    reported_row(start as f64,"0.300"),
+                    reported_row((start+14*MINUTE+30_000)as f64+0.25,"unavailable")
+                ]}),
+                start,
+                start + 15 * MINUTE,
+            )
+            .unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[
+                    reported_row((start+15*MINUTE)as f64,"unavailable"),
+                    reported_row((start+16*MINUTE+10_000)as f64+0.75,"0.300")
+                ]}),
+                start + 15 * MINUTE,
+                start + 30 * MINUTE,
+            )
+            .unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[reported_row((start+30*MINUTE)as f64,"0.300")]}),
+                start + 30 * MINUTE,
+                window.end,
+            )
+            .unwrap();
+        let coverage = samples.coverage(Some("reported-night-unavailable-coverage"));
+        assert_eq!(coverage.unavailable_intervals, 1);
+        assert_eq!(coverage.unavailable_ms, 100_001);
+        assert_eq!(coverage.valid_minutes, 37);
+        assert_eq!(coverage.total_minutes, 40);
+        assert!(coverage.complete);
+        assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
+    }
+
+    #[test]
+    fn unavailable_at_night_start_and_end_is_measured_not_treated_as_missing_boundary() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[reported_row(start as f64,"unavailable"),
+            reported_row((start+MINUTE)as f64,"0.300"),
+            reported_row((window.end-MINUTE)as f64,"unknown")]}),
+                start,
+                window.end,
+            )
+            .unwrap();
+        let coverage = samples.coverage(None);
+        assert_eq!(coverage.unavailable_intervals, 2);
+        assert_eq!(coverage.unavailable_ms, 120_000);
+        assert_eq!(coverage.valid_minutes, 38);
+        let path = std::env::temp_dir().join(format!("solar-night-coverage-{}.json", std::process::id()));
+        coverage.save(&path).unwrap();
+        coverage.save(&path).unwrap();
+        let restored: NightCoverage = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored, coverage);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
     }
 
     #[test]

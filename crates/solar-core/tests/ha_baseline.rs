@@ -197,3 +197,33 @@ fn reported_night_cache_and_ui_preserve_estimate_provenance_and_source_identity(
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(directory).unwrap();
 }
+
+#[test]
+fn rejected_reported_night_shows_selected_window_actual_gap_duration_and_coverage() {
+    let c = config();
+    let now = time("2026-11-02T12:00:00Z");
+    let window = completed_window(&c, now).unwrap();
+    let total_minutes = ((window.end - window.start) / 60_000) as usize;
+    let mut runtime = solar_core::Runtime::new(c);
+    let mut snapshot = runtime.snapshot(now);
+    snapshot.night_history_coverage = Some(solar_core::ha_baseline::NightCoverage {
+        window,
+        queried_through: window.end,
+        total_minutes,
+        valid_minutes: total_minutes - 3,
+        unavailable_intervals: 1,
+        unavailable_ms: 100_001,
+        source: "HA reported grid-import power; held state, not physical acquisition".into(),
+        complete: true,
+        issue: Some("reported-night-unavailable-coverage".into()),
+        persistence_issue: None,
+    });
+    let info = solar_core::present::solar_info(&snapshot);
+    let power = info.section("Power now").unwrap();
+    assert!(power.value("Recorded night coverage").unwrap().contains("query complete"));
+    assert!(power.value("Recorded night outages").unwrap().contains("1 intervals; 100.001s"));
+    assert!(power.value("Queried night").unwrap().contains("Europe/Brussels"));
+    assert!(power.value("Night baseline").unwrap().contains("default"));
+    let restored: solar_core::Snapshot = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+    assert_eq!(restored.night_history_coverage.unwrap().valid_minutes, total_minutes - 3);
+}

@@ -58,6 +58,8 @@ pub struct Snapshot {
     pub night_baseline_samples: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub night_baseline_history: Option<crate::ha_baseline::HistoryStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_history_coverage: Option<crate::ha_baseline::NightCoverage>,
     pub reading_at: Option<i64>,
     pub checked_at: i64,
 }
@@ -86,6 +88,7 @@ pub struct Runtime {
     reported_history: Option<crate::ha_reported_energy::HistoryProgress>,
     night_baseline: NightBaseline,
     baseline_history: Option<crate::ha_baseline::HistoryStatus>,
+    night_history_coverage: Option<crate::ha_baseline::NightCoverage>,
     sun_times: Option<(i64, SunTimes)>,
 }
 
@@ -114,6 +117,7 @@ impl Runtime {
             daily_energy: DailyEnergy::new(),
             night_baseline: NightBaseline::new(),
             baseline_history,
+            night_history_coverage: None,
             sun_times: None,
         }
     }
@@ -124,6 +128,10 @@ impl Runtime {
 
     pub(crate) fn set_baseline_history(&mut self, status: crate::ha_baseline::HistoryStatus) {
         self.baseline_history = Some(status);
+    }
+
+    pub(crate) fn set_night_coverage(&mut self, coverage: crate::ha_baseline::NightCoverage) {
+        self.night_history_coverage = Some(coverage);
     }
 
     pub(crate) fn restore_daily_baseline(&mut self, baseline: crate::ha_daily::CounterBaseline) {
@@ -532,6 +540,7 @@ impl Runtime {
             night_baseline_learned,
             night_baseline_samples,
             night_baseline_history: self.baseline_history.clone(),
+            night_history_coverage: self.night_history_coverage.clone(),
             reading_at: reading.map(|r| r.timestamp),
             checked_at: now,
             evaluation,

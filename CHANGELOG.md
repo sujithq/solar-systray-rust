@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rejected HA reported night baselines now show and privately record the
+  selected window, fully available minutes and merged outage duration/count.
+  Held unavailable chunk boundaries continue one interval rather than hiding
+  coverage behind the first unavailable row; full-night acceptance is unchanged.
 - HA night baseline can use an explicitly labeled recorded grid-import-power
   estimate when atomic acquisition history is unavailable. It takes the median
   of held minute-start values across a fully available completed solar night;

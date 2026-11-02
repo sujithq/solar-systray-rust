@@ -280,6 +280,25 @@ so no physical freshness/continuity claim is made. Authentication, transport and
 protocol failures do not trigger this alternative source. Actual overnight
 legacy power availability remains a live acceptance requirement.
 
+When reported-night history contains an explicit outage, the query now continues
+to measure the **whole selected night** without accepting a baseline. The menu
+shows the selected Brussels window, fully available minutes/total (a minute
+touched by any outage is invalid), query completeness, merged outage interval
+count and unavailable duration. A held unavailable state at a chunk boundary
+continues the same interval; it is not counted twice. Sub-millisecond event
+times are retained for interval arithmetic and the total duration is rounded up
+to milliseconds. These are HA reported-state coverage facts, not physical
+acquisition proof.
+
+The private `.night-baseline.night-coverage.json` sibling of the tray config
+persists that sanitized evidence, source category and fixed issue code, with
+no coordinates, entity IDs, endpoint, credentials or raw powers. Partial queries
+are explicitly marked incomplete; malformed protocol/data may still stop the
+query early. Report-write failure appears in the menu. The current policy
+remains **latest completed night, 100% recorded availability**; it does not
+silently search earlier nights or accept a partially observed median. A prior
+valid cached baseline remains retained with its original date/age on failure.
+
 Requests use 15-minute chunks, the existing 1 MiB message bound, at most 32 MiB
 aggregate response data, a 20-second response timeout and a 180-second overall
 retrieval deadline per source attempt. Failure affects only the baseline, never live grid/GO.

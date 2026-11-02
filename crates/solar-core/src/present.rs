@@ -288,6 +288,41 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             format!("{text} default; waiting for overnight data")
         };
         rows.push(row("Night baseline", state, Tone::Muted));
+        if let Some(coverage) = &s.night_history_coverage {
+            rows.push(row(
+                "Queried night",
+                format!("{} - {}", meter_instant(coverage.window.start), meter_instant(coverage.window.end)),
+                Tone::Muted,
+            ));
+            let percent = if coverage.total_minutes == 0 {
+                0.0
+            } else {
+                coverage.valid_minutes as f64 * 100.0 / coverage.total_minutes as f64
+            };
+            rows.push(row(
+                "Recorded night coverage",
+                format!(
+                    "{}/{} fully available minutes ({percent:.2}%); {}",
+                    coverage.valid_minutes,
+                    coverage.total_minutes,
+                    if coverage.complete { "query complete" } else { "query incomplete" }
+                ),
+                Tone::Warn,
+            ));
+            rows.push(row(
+                "Recorded night outages",
+                format!(
+                    "{} intervals; {:.3}s unavailable; held chunk repeats not counted twice",
+                    coverage.unavailable_intervals,
+                    coverage.unavailable_ms as f64 / 1000.0
+                ),
+                Tone::Warn,
+            ));
+            rows.push(row("Queried night source", &coverage.source, Tone::Muted));
+            if let Some(issue) = &coverage.persistence_issue {
+                rows.push(row("Night coverage report", issue, Tone::Warn));
+            }
+        }
         if let Some(history) = &s.night_baseline_history {
             if let Some(issue) = &history.issue {
                 rows.push(row("Baseline status", issue, Tone::Warn));

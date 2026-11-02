@@ -760,12 +760,13 @@ pub(crate) fn recorded_reported_night(
     config: &crate::SolarConfig,
     stop: &AtomicBool,
     window: crate::ha_baseline::NightWindow,
+    progress: impl FnMut(crate::ha_baseline::NightCoverage),
 ) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
     let token = std::env::var(&config.home_assistant.token_env).map_err(|_| "history-token-missing")?;
     if token.is_empty() || token.len() > 8192 || token.bytes().any(|b| b.is_ascii_control()) {
         return Err("history-token-invalid");
     }
-    recorded_reported_night_with_token(config, stop, window, &token)
+    recorded_reported_night_with_token(config, stop, window, &token, progress)
 }
 
 fn recorded_reported_night_with_token(
@@ -773,10 +774,12 @@ fn recorded_reported_night_with_token(
     stop: &AtomicBool,
     window: crate::ha_baseline::NightWindow,
     token: &str,
+    mut progress: impl FnMut(crate::ha_baseline::NightCoverage),
 ) -> Result<crate::ha_baseline::RecordedBaseline, &'static str> {
     let entity = config.home_assistant.grid_import.clone();
     let mut samples = crate::ha_baseline::ReportedNightSamples::new(window, entity.clone())?;
-    query_entity_history(
+    progress(samples.coverage(None));
+    let query = query_entity_history(
         config,
         stop,
         token,
@@ -788,10 +791,22 @@ fn recorded_reported_night_with_token(
             entities: vec![entity],
             include_start: true,
         },
-        |result, start, end| samples.append(result, start, end),
+        |result, start, end| {
+            let result = samples.append(result, start, end);
+            progress(samples.coverage(result.as_ref().err().copied()));
+            result
+        },
         |_, _| {},
-    )?;
-    samples.finish(crate::now_ms())
+    );
+    if let Err(issue) = query {
+        progress(samples.coverage(Some(issue)));
+        return Err(issue);
+    }
+    let mut coverage = samples.coverage(None);
+    let result = samples.finish(crate::now_ms());
+    coverage.issue = result.as_ref().err().map(|issue| (*issue).into());
+    progress(coverage);
+    result
 }
 
 pub(crate) fn recorded_daily(
@@ -1116,7 +1131,8 @@ mod recorded_history_tests {
                 }
             });
         let baseline =
-            recorded_reported_night_with_token(&config, &AtomicBool::new(false), window, "fixture-token").unwrap();
+            recorded_reported_night_with_token(&config, &AtomicBool::new(false), window, "fixture-token", |_| {})
+                .unwrap();
         assert_eq!(baseline.watts, 321.0);
         assert_eq!(baseline.samples, 40);
         assert_eq!(baseline.provenance, crate::ha_baseline::REPORTED_PROVENANCE);
