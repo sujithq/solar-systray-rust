@@ -19,11 +19,14 @@ description: Security checks for JSON configuration, DSMR telegrams, Sungrow Mod
 - Reported night-baseline alternative: only configured gridImport raw power
   kW/power/measurement history is eligible after atomic acquisition/coverage
   failure, not auth/transport failures. Use held start-state, fractional event
-  ordering, full completed solar-night coverage and >=30 UTC-minute-start
-  values; reject explicit unknown/unavailable intervals and malformed inputs,
+  ordering, a fully queried completed solar-night window, >=95% fully available
+  minutes (exact integer comparison) and >=30 valid UTC-minute-start values.
+  Exclude every minute touched by unknown/unavailable from the median, including
+  a previously collected valid minute-start value; reject malformed inputs,
   never interpolate outages or substitute statistics/means. Label held-state
   median as a reported estimate, not physical acquisition. Cache identity must
-  bind both entities/location/schedule/statistic and validated provenance;
+  bind both entities/location/schedule/statistic/coverage policy and validated
+  provenance, persist valid/total minutes and merged outages in version2 cache;
   prior valid results survive failed refresh. Bounds and live isolation match
   the atomic night path. Test constant held values, gaps, boundaries and cache.
 

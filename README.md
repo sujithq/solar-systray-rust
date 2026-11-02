@@ -268,20 +268,24 @@ requiring a numerical change or pretending the held state was newly acquired.
 The median still uses minute values, never hourly/five-minute means. Duration
 influences the number of repeated minute samples, not an event-count median.
 
-The reported estimate requires **100% recorded availability** over the same
-completed sunset-to-sunrise observation window and at least 30 minute samples.
+The advisory reported estimate requires **at least 95% fully available minutes**
+over the same completed sunset-to-sunrise observation window and at least
+**30 valid minute samples**. Coverage is compared with exact integer arithmetic,
+not rounded display percentages. Every minute touched by an explicit
+`unknown`/`unavailable` interval is excluded completely from the median, even if
+its minute-start reading was valid. Gaps are never filled or treated as zero.
 Every chunk needs a valid held boundary and ordered events (fractional
-milliseconds accepted). Missing history, any explicit `unknown`/`unavailable`
-interval, malformed/negative/out-of-range power, wrong metadata, inconsistent
-chunk boundaries or incomplete coverage rejects it; outages are not bridged or
-filled with zero. Silence while a valid state is held is allowed only as HA's
+milliseconds accepted). Missing history, malformed/negative/out-of-range power,
+wrong metadata, inconsistent chunk boundaries or an incomplete query rejects
+it regardless of coverage. A fully queried night below 95% is also rejected.
+Silence while a valid state is held is allowed only as HA's
 reported-state semantics: unrecorded physical outages/cache cannot be detected,
 so no physical freshness/continuity claim is made. Authentication, transport and
 protocol failures do not trigger this alternative source. Actual overnight
 legacy power availability remains a live acceptance requirement.
 
-When reported-night history contains an explicit outage, the query now continues
-to measure the **whole selected night** without accepting a baseline. The menu
+When reported-night history contains an explicit outage, the query continues
+to measure the **whole selected night** before applying the coverage policy. The menu
 shows the selected Brussels window, fully available minutes/total (a minute
 touched by any outage is invalid), query completeness, merged outage interval
 count and unavailable duration. A held unavailable state at a chunk boundary
@@ -295,8 +299,12 @@ persists that sanitized evidence, source category and fixed issue code, with
 no coordinates, entity IDs, endpoint, credentials or raw powers. Partial queries
 are explicitly marked incomplete; malformed protocol/data may still stop the
 query early. Report-write failure appears in the menu. The current policy
-remains **latest completed night, 100% recorded availability**; it does not
-silently search earlier nights or accept a partially observed median. A prior
+is **latest completed night, >=95% fully available minutes and >=30 valid
+samples**; it does not silently search earlier nights. The median is explicitly
+an observed-valid-minute estimate and can be biased if missing minutes had
+different consumption. Coverage and outage details persist with cache version 2
+and the new statistic/source-policy identity, so they remain visible after
+restart; older-policy caches are invalidated rather than mislabeled. A prior
 valid cached baseline remains retained with its original date/age on failure.
 
 Requests use 15-minute chunks, the existing 1 MiB message bound, at most 32 MiB

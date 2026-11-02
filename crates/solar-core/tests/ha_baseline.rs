@@ -89,6 +89,7 @@ fn cache_restores_baseline_before_live_data_and_rejects_source_changes() {
         samples: ((window.end - window.start) / 60_000) as usize,
         unit: "W".into(),
         provenance: "HA recorder atomic grid import; first sample per UTC minute median".into(),
+        coverage: None,
     };
     save_cache(&path, &c, &baseline).unwrap();
     save_cache(&path, &c, &baseline).unwrap();
@@ -174,12 +175,39 @@ fn reported_night_cache_and_ui_preserve_estimate_provenance_and_source_identity(
         window,
         calculated_at: now,
         watts: 321.0,
-        samples: ((window.end - window.start) / 60_000) as usize,
+        samples: ((window.end - window.start) / 60_000) as usize - 14,
         unit: "W".into(),
         provenance: solar_core::ha_baseline::REPORTED_PROVENANCE.into(),
+        coverage: Some(solar_core::ha_baseline::NightCoverage {
+            window,
+            queried_through: window.end,
+            total_minutes: ((window.end - window.start) / 60_000) as usize,
+            valid_minutes: ((window.end - window.start) / 60_000) as usize - 14,
+            unavailable_intervals: 5,
+            unavailable_ms: 499912,
+            source: "HA reported grid-import power; held state, not physical acquisition".into(),
+            complete: true,
+            issue: None,
+            persistence_issue: None,
+        }),
     };
     save_cache(&path, &c, &baseline).unwrap();
     assert_eq!(load_cache(&path, &c, now).unwrap(), Some(baseline.clone()));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["version"], 2);
+    for fault in ["version", "policy", "coverage", "samples", "missing"] {
+        let mut bad = saved.clone();
+        match fault {
+            "version" => bad["version"] = json!(1),
+            "policy" => bad["identity"]["statistic"] = json!("atomic-first-or-reported-held-utc-minute-median-v2"),
+            "coverage" => bad["baseline"]["coverage"]["validMinutes"] = json!(1),
+            "samples" => bad["baseline"]["samples"] = json!(1),
+            _ => bad["baseline"]["coverage"] = serde_json::Value::Null,
+        }
+        std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(load_cache(&path, &c, now).is_err(), "{fault}");
+    }
+    save_cache(&path, &c, &baseline).unwrap();
     let mut changed = c.clone();
     changed.home_assistant.grid_import = "sensor.other_power".into();
     assert_eq!(load_cache(&path, &changed, now), Err("history-cache-source-mismatch"));
@@ -191,7 +219,9 @@ fn reported_night_cache_and_ui_preserve_estimate_provenance_and_source_identity(
     let info = solar_core::present::solar_info(&snapshot);
     let rows = info.section("Power now").unwrap();
     assert!(rows.value("Night baseline").unwrap().contains("reported-history estimate"));
-    assert!(rows.value("Baseline samples").unwrap().contains("100% recorded availability"));
+    assert!(rows.value("Baseline samples").unwrap().contains("outage-touched minutes excluded"));
+    assert!(rows.value("Recorded night coverage").unwrap().contains(">=95%"));
+    assert!(rows.value("Recorded night outages").unwrap().contains("5 intervals; 499.912s"));
     assert!(snapshot.reading_at.is_none());
     assert!(!snapshot.evaluation.safe_to_start);
     std::fs::remove_file(path).unwrap();

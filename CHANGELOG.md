@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Advisory HA reported night estimates now accept at least 95% fully available
+  minute coverage and at least 30 valid samples. Every outage-touched minute is
+  excluded from the median; coverage/outages and the new policy persist in the
+  versioned private cache and remain visible after restart. Atomic/live rules
+  are unchanged.
 - Rejected HA reported night baselines now show and privately record the
   selected window, fully available minutes and merged outage duration/count.
   Held unavailable chunk boundaries continue one interval rather than hiding

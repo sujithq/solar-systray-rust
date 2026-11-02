@@ -17,7 +17,11 @@ use std::time::Duration;
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
 pub const ATOMIC_PROVENANCE: &str = "HA recorder atomic grid import; first sample per UTC minute median";
-pub const REPORTED_PROVENANCE: &str = "HA reported grid import estimate; held UTC-minute-start median; full recorded availability, physical acquisition unverified";
+pub const REPORTED_PROVENANCE: &str = "HA reported grid import estimate; valid held UTC-minute-start median; >=95% fully available minutes, physical acquisition unverified";
+
+fn reported_coverage_eligible(valid: usize, total: usize) -> bool {
+    total > 0 && valid <= total && valid >= MIN_NIGHT_SAMPLES && valid * 100 >= total * 95
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +83,8 @@ pub struct RecordedBaseline {
     pub samples: usize,
     pub unit: String,
     pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<NightCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,7 +117,7 @@ fn identity(config: &SolarConfig) -> Value {
         "longitude": config.location.longitude,
         "refreshAt": config.home_assistant.night_baseline_refresh_at,
         "timezone": "Europe/Brussels",
-        "statistic": "atomic-first-or-reported-held-utc-minute-median-v2"
+        "statistic": "atomic-first-or-reported-valid-held-utc-minute-median-95pct-v3"
     })
 }
 
@@ -136,7 +142,7 @@ pub fn load_cache(path: &Path, config: &SolarConfig, now: i64) -> Result<Option<
     }
     let cache: Cache = serde_json::from_slice(&bytes).map_err(|_| "history-cache-invalid")?;
     let b = &cache.baseline;
-    if cache.version != 1 || cache.identity != identity(config) {
+    if cache.version != 2 || cache.identity != identity(config) {
         return Err("history-cache-source-mismatch");
     }
     if !b.watts.is_finite()
@@ -149,17 +155,40 @@ pub fn load_cache(path: &Path, config: &SolarConfig, now: i64) -> Result<Option<
         || b.window.end - b.window.start > DAY
         || b.window.start.rem_euclid(MINUTE) != 0
         || b.window.end.rem_euclid(MINUTE) != 0
-        || b.samples as i64 != (b.window.end - b.window.start) / MINUTE
         || b.window.end > b.calculated_at
         || b.calculated_at > now
     {
         return Err("history-cache-invalid");
     }
+    let total = ((b.window.end - b.window.start) / MINUTE) as usize;
+    if b.provenance == ATOMIC_PROVENANCE {
+        if b.samples != total || b.coverage.is_some() {
+            return Err("history-cache-invalid");
+        }
+    } else {
+        let c = b.coverage.as_ref().ok_or("history-cache-invalid")?;
+        if c.window != b.window
+            || !c.complete
+            || c.queried_through != b.window.end
+            || c.total_minutes != total
+            || c.valid_minutes != b.samples
+            || !reported_coverage_eligible(c.valid_minutes, c.total_minutes)
+            || c.unavailable_ms > (b.window.end - b.window.start) as u64
+            || c.unavailable_intervals > 100_000
+            || (c.unavailable_intervals == 0) != (c.unavailable_ms == 0)
+            || (c.unavailable_intervals == 0) != (c.valid_minutes == c.total_minutes)
+            || c.source != REPORTED_COVERAGE_SOURCE
+            || c.issue.is_some()
+            || c.persistence_issue.is_some()
+        {
+            return Err("history-cache-invalid");
+        }
+    }
     Ok(Some(cache.baseline))
 }
 
 pub fn save_cache(path: &Path, config: &SolarConfig, baseline: &RecordedBaseline) -> Result<(), &'static str> {
-    let cache = Cache { version: 1, identity: identity(config), baseline: baseline.clone() };
+    let cache = Cache { version: 2, identity: identity(config), baseline: baseline.clone() };
     let bytes = serde_json::to_vec(&cache).map_err(|_| "history-cache-write")?;
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, bytes).map_err(|_| "history-cache-write")?;
@@ -252,6 +281,7 @@ impl NightSamples {
             samples: values.len(),
             unit: "W".into(),
             provenance: ATOMIC_PROVENANCE.into(),
+            coverage: None,
         })
     }
 }
@@ -270,6 +300,8 @@ pub struct NightCoverage {
     pub issue: Option<String>,
     pub persistence_issue: Option<String>,
 }
+
+const REPORTED_COVERAGE_SOURCE: &str = "HA reported grid-import power; held state, not physical acquisition";
 
 impl NightCoverage {
     pub(crate) fn save(&self, path: &Path) -> Result<(), &'static str> {
@@ -414,7 +446,7 @@ impl ReportedNightSamples {
             valid_minutes: self.values.keys().filter(|minute| !self.invalid_minutes.contains(minute)).count(),
             unavailable_intervals: self.unavailable_intervals,
             unavailable_ms: self.unavailable_ms.ceil() as u64,
-            source: "HA reported grid-import power; held state, not physical acquisition".into(),
+            source: REPORTED_COVERAGE_SOURCE.into(),
             complete: self.through == self.window.end,
             issue: issue.map(String::from),
             persistence_issue: None,
@@ -422,22 +454,27 @@ impl ReportedNightSamples {
     }
 
     pub(crate) fn finish(self, now: i64) -> Result<RecordedBaseline, &'static str> {
-        if self.unavailable_intervals > 0 {
-            return Err("reported-night-unavailable-coverage");
-        }
-        if self.through != self.window.end
-            || self.values.len() < MIN_NIGHT_SAMPLES
-            || self.values.len() as i64 != (self.window.end - self.window.start) / MINUTE
-        {
+        let coverage = self.coverage(None);
+        if self.through != self.window.end {
             return Err("reported-night-incomplete-coverage");
         }
+        if !reported_coverage_eligible(coverage.valid_minutes, coverage.total_minutes) {
+            return Err("reported-night-below-95-percent-coverage");
+        }
+        let values: Vec<_> = self
+            .values
+            .iter()
+            .filter(|(minute, _)| !self.invalid_minutes.contains(minute))
+            .map(|(_, value)| *value)
+            .collect();
         Ok(RecordedBaseline {
             window: self.window,
             calculated_at: now,
-            watts: median(&self.values.values().copied().collect::<Vec<_>>()),
-            samples: self.values.len(),
+            watts: median(&values),
+            samples: values.len(),
             unit: "W".into(),
             provenance: REPORTED_PROVENANCE.into(),
+            coverage: Some(coverage),
         })
     }
 }
@@ -576,7 +613,7 @@ mod tests {
             let result = samples.append(&json!({"sensor.grid":rows}), start, start + 15 * MINUTE);
             if matches!(fault, "unknown" | "unavailable") {
                 result.unwrap();
-                assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
+                assert_eq!(samples.finish(window.end + 1), Err("reported-night-incomplete-coverage"));
             } else {
                 assert!(result.is_err(), "{fault}");
             }
@@ -623,13 +660,13 @@ mod tests {
                 window.end,
             )
             .unwrap();
-        let coverage = samples.coverage(Some("reported-night-unavailable-coverage"));
+        let coverage = samples.coverage(Some("reported-night-below-95-percent-coverage"));
         assert_eq!(coverage.unavailable_intervals, 1);
         assert_eq!(coverage.unavailable_ms, 100_001);
         assert_eq!(coverage.valid_minutes, 37);
         assert_eq!(coverage.total_minutes, 40);
         assert!(coverage.complete);
-        assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
+        assert_eq!(samples.finish(window.end + 1), Err("reported-night-below-95-percent-coverage"));
     }
 
     #[test]
@@ -656,7 +693,7 @@ mod tests {
         let restored: NightCoverage = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(restored, coverage);
         std::fs::remove_file(path).unwrap();
-        assert_eq!(samples.finish(window.end + 1), Err("reported-night-unavailable-coverage"));
+        assert_eq!(samples.finish(window.end + 1).unwrap().samples, 38);
     }
 
     #[test]
@@ -679,6 +716,85 @@ mod tests {
             assert_eq!(baseline.samples as i64, (window.end - window.start) / MINUTE);
             assert_eq!(baseline.watts, 250.0);
         }
+    }
+
+    #[test]
+    fn reported_coverage_threshold_is_exact_and_keeps_thirty_minimum() {
+        assert!(!reported_coverage_eligible(9499, 10_000));
+        assert!(reported_coverage_eligible(9500, 10_000));
+        assert!(!reported_coverage_eligible(29, 30));
+        assert!(reported_coverage_eligible(30, 30));
+        assert!(reported_coverage_eligible(844, 858));
+        assert!(!reported_coverage_eligible(815, 858));
+        assert!(reported_coverage_eligible(816, 858));
+        assert!(!reported_coverage_eligible(0, 0));
+    }
+
+    #[test]
+    fn accepted_median_excludes_minute_start_values_later_touched_by_outage() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[
+                    reported_row(start as f64,"1.000"),
+                    reported_row(start as f64+0.25,"unavailable"),
+                    reported_row((start+2*MINUTE)as f64,"0.100"),
+                    reported_row((start+21*MINUTE)as f64,"0.300")
+                ]}),
+                start,
+                window.end,
+            )
+            .unwrap();
+        let baseline = samples.finish(window.end + 1).unwrap();
+        assert_eq!(baseline.samples, 38);
+        assert_eq!(baseline.watts, 200.0, "invalid high minute-start value must not bias median to300");
+        assert_eq!(baseline.coverage.unwrap().valid_minutes, 38);
+    }
+
+    #[test]
+    fn outage_at_exact_minute_boundary_and_submillisecond_edge_invalidates_only_touched_minutes() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 40 * MINUTE };
+        for at in [(start + MINUTE) as f64, (start + MINUTE) as f64 - 0.25] {
+            let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+            samples
+                .append(
+                    &json!({"sensor.grid":[
+                        reported_row(start as f64,"0.300"),
+                        reported_row(at,"unavailable"),
+                        reported_row((start+2*MINUTE)as f64,"0.300")
+                    ]}),
+                    start,
+                    window.end,
+                )
+                .unwrap();
+            let baseline = samples.finish(window.end + 1).unwrap();
+            assert_eq!(baseline.samples, if at == (start + MINUTE) as f64 { 39 } else { 38 });
+        }
+    }
+
+    #[test]
+    fn observed_858_minute_844_valid_coverage_is_eligible_without_filling_fourteen_minutes() {
+        let start = 1_800_000_000_000;
+        let window = NightWindow { start, end: start + 858 * MINUTE };
+        let mut samples = ReportedNightSamples::new(window, "sensor.grid".into()).unwrap();
+        samples
+            .append(
+                &json!({"sensor.grid":[
+                    reported_row(start as f64,"0.250"),
+                    reported_row((start+10*MINUTE)as f64,"unavailable"),
+                    reported_row((start+24*MINUTE)as f64,"0.250")
+                ]}),
+                start,
+                window.end,
+            )
+            .unwrap();
+        let baseline = samples.finish(window.end + 1).unwrap();
+        assert_eq!(baseline.samples, 844);
+        assert_eq!(baseline.watts, 250.0);
+        assert_eq!(baseline.coverage.unwrap().total_minutes, 858);
     }
 
     fn samples(step: i64, gap: bool) -> NightSamples {

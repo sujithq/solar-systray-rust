@@ -101,6 +101,7 @@ fn recorded_night_baseline_displays_provenance_age_and_retained_refresh_error() 
                 samples: 600,
                 unit: "W".into(),
                 provenance: "HA recorder atomic grid import; first sample per UTC minute median".into(),
+                coverage: None,
             }),
             issue: Some("history-incomplete-night".into()),
         });

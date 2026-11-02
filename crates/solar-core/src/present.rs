@@ -288,7 +288,11 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             format!("{text} default; waiting for overnight data")
         };
         rows.push(row("Night baseline", state, Tone::Muted));
-        if let Some(coverage) = &s.night_history_coverage {
+        if let Some(coverage) = s
+            .night_history_coverage
+            .as_ref()
+            .or_else(|| s.night_baseline_history.as_ref()?.baseline.as_ref()?.coverage.as_ref())
+        {
             rows.push(row(
                 "Queried night",
                 format!("{} - {}", meter_instant(coverage.window.start), meter_instant(coverage.window.end)),
@@ -302,7 +306,7 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             rows.push(row(
                 "Recorded night coverage",
                 format!(
-                    "{}/{} fully available minutes ({percent:.2}%); {}",
+                    "{}/{} fully available minutes ({percent:.2}%); {}; reported estimate requires >=95% and >=30 valid minutes",
                     coverage.valid_minutes,
                     coverage.total_minutes,
                     if coverage.complete { "query complete" } else { "query incomplete" }
@@ -354,7 +358,7 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
                         "{} {}",
                         baseline.samples,
                         if baseline.provenance == crate::ha_baseline::REPORTED_PROVENANCE {
-                            "held minute-start values; 100% recorded availability, not physical continuity"
+                            "valid held minute-start values; outage-touched minutes excluded, not physical continuity"
                         } else {
                             "actual minute samples"
                         }
