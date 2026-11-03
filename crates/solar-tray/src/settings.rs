@@ -10,6 +10,25 @@ use std::path::{Path, PathBuf};
 
 pub const APP_DIR: &str = "Solar Systray";
 pub const COMPANION: &str = r"Solar Agent Data\companion.json";
+pub const HA_CONFIG_ENV: &str = "SOLAR_SYSTRAY_HA_CONFIG";
+
+pub fn isolated_ha_path(value: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || !path.is_file() {
+        return Err("SOLAR_SYSTRAY_HA_CONFIG must name an existing absolute HA config file.".into());
+    }
+    Ok(Some(path))
+}
+
+pub fn load_existing_ha(path: &Path) -> Result<Loaded, String> {
+    let text = std::fs::read_to_string(path).map_err(|_| "Cannot read isolated HA config.".to_string())?;
+    let (solar_json, solar, tray) = parse(text.trim_start_matches('\u{feff}'))?;
+    if !solar.is_ha() || solar.home_assistant.atomic_grid.is_empty() {
+        return Err("Isolated HA config requires home-assistant mode and an atomicGrid entity.".into());
+    }
+    Ok(Loaded { solar_json, solar, tray, seeded: None })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -211,6 +230,32 @@ pub fn load_or_seed(path: &Path, companion: Option<&Path>) -> Result<Loaded, Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn isolated_override_requires_existing_absolute_atomic_ha_without_seeding() {
+        assert!(isolated_ha_path(None).unwrap().is_none());
+        assert!(isolated_ha_path(Some("config.json".into())).is_err());
+        let dir = temp_dir("isolated-ha");
+        let path = dir.join("isolated.json");
+        assert!(load_existing_ha(&path).is_err());
+        assert!(!path.exists());
+        save(&path, &json!({"energySource":{"type":"mock"}}), &TraySettings::default()).unwrap();
+        assert!(load_existing_ha(&path).is_err());
+        save(&path, &json!({"energySource":{"type":"home-assistant"}}), &TraySettings::default()).unwrap();
+        assert!(load_existing_ha(&path).is_err());
+        save(
+            &path,
+            &json!({"energySource":{"type":"home-assistant"},
+            "homeAssistant":{"atomicGrid":"sensor.dsmr_atomic_grid_sample"}}),
+            &TraySettings::default(),
+        )
+        .unwrap();
+        assert_eq!(isolated_ha_path(Some(path.clone().into_os_string())).unwrap(), Some(path.clone()));
+        let loaded = load_existing_ha(&path).unwrap();
+        assert!(loaded.solar.is_ha() && loaded.seeded.is_none());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("solar-systray-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -224,6 +269,47 @@ mod tests {
         assert_eq!(solar_json, json!({}));
         assert!(solar.is_mock());
         assert_eq!(tray, TraySettings::default());
+    }
+
+    #[test]
+    fn ha_settings_preserve_credential_reference_and_companion_compatibility() {
+        let solar = json!({"energySource":{"type":"home-assistant"},
+            "homeAssistant":{"tokenEnv":"SOLAR_HA_TOKEN","gridSkewSeconds":3,"atomicGrid":"sensor.dsmr_atomic_grid_sample_2",
+                "activePower":"sensor.sg5_0rs_local_total_active_power","dcPower":"sensor.sg5_0rs_local_total_dc_power",
+            "currentDemand":"sensor.electricity_meter_current_average_demand",
+            "monthlyPeak":"sensor.electricity_meter_maximum_demand_current_month",
+            "energyImportTariff1":"sensor.electricity_meter_energy_consumption_tarif_1",
+            "energyImportTariff2":"sensor.electricity_meter_energy_consumption_tarif_2",
+            "energyExportTariff1":"sensor.electricity_meter_energy_production_tarif_1",
+            "energyExportTariff2":"sensor.electricity_meter_energy_production_tarif_2",
+            "meterDataStaleSeconds":75,"meterDataMaxEventSkewSeconds":25,
+            "nightBaseline":{"enabled":true,"refreshAt":"07:15"},
+            "householdUse":{"enabled":false,"topology":"","generationSign":0,"maxEventSkewSeconds":4}}});
+        let text = render(&solar, &TraySettings::default());
+        let (saved, config, _) = parse(&text).unwrap();
+        assert!(config.is_ha());
+        assert_eq!(saved, solar);
+        assert_eq!(config.home_assistant.token_env, "SOLAR_HA_TOKEN");
+        assert_eq!(config.home_assistant.grid_skew_seconds, 3.0);
+        assert_eq!(config.home_assistant.atomic_grid, "sensor.dsmr_atomic_grid_sample_2");
+        assert_eq!(config.home_assistant.active_power, "sensor.sg5_0rs_local_total_active_power");
+        assert_eq!(config.home_assistant.dc_power, "sensor.sg5_0rs_local_total_dc_power");
+        assert_eq!(config.home_assistant.current_demand, "sensor.electricity_meter_current_average_demand");
+        assert_eq!(config.home_assistant.monthly_peak, "sensor.electricity_meter_maximum_demand_current_month");
+        assert_eq!(config.home_assistant.energy_import_tariff1, "sensor.electricity_meter_energy_consumption_tarif_1");
+        assert_eq!(config.home_assistant.energy_import_tariff2, "sensor.electricity_meter_energy_consumption_tarif_2");
+        assert_eq!(config.home_assistant.energy_export_tariff1, "sensor.electricity_meter_energy_production_tarif_1");
+        assert_eq!(config.home_assistant.energy_export_tariff2, "sensor.electricity_meter_energy_production_tarif_2");
+        assert_eq!(config.home_assistant.meter_data_stale_seconds, 75.0);
+        assert_eq!(config.home_assistant.meter_data_max_event_skew_seconds, 25.0);
+        assert!(config.home_assistant.night_baseline_enabled);
+        assert_eq!(config.home_assistant.night_baseline_refresh_at, "07:15");
+        assert!(!config.home_assistant.household_use_enabled);
+        assert_eq!(config.home_assistant.household_max_event_skew_seconds, 4.0);
+        let companion = json!({"mode":"solar","solar":solar}).to_string();
+        let seeded = seed_from_companion(&companion).unwrap();
+        assert!(SolarConfig::from_json(&seeded).unwrap().is_ha());
+        assert_eq!(seeded["homeAssistant"]["tokenEnv"], "SOLAR_HA_TOKEN");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::net::Ipv4Addr;
 pub enum SourceKind {
     Mock,
     SlimmeLezer,
+    HomeAssistant,
 }
 
 impl SourceKind {
@@ -16,6 +17,7 @@ impl SourceKind {
         match self {
             SourceKind::Mock => "mock",
             SourceKind::SlimmeLezer => "slimmelezer",
+            SourceKind::HomeAssistant => "home-assistant",
         }
     }
 }
@@ -70,6 +72,7 @@ pub struct Appliance {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolarConfig {
     pub energy_source: EnergySource,
+    pub home_assistant: crate::home_assistant::HaConfig,
     pub inverter_source: InverterSource,
     pub decision: DecisionConfig,
     pub location: Location,
@@ -88,6 +91,24 @@ pub fn defaults() -> Value {
     json!({
         "energySource": { "type": "mock", "host": "192.0.2.10", "port": 23, "allowLegacyWithoutCrc": false },
         "inverterSource": { "host": "", "port": 502, "unitId": 1 },
+        "homeAssistant": {
+            "endpoint": "ws://127.0.0.1:8123/api/websocket", "tokenEnv": "SOLAR_HA_TOKEN",
+            "gridImport": "sensor.electricity_meter_power_consumption",
+            "gridExport": "sensor.electricity_meter_power_production",
+            "atomicGrid": "",
+            "activePower": "", "dcPower": "", "inverterStaleSeconds": 90, "gridSkewSeconds": 5,
+            "currentDemand": "sensor.electricity_meter_current_average_demand",
+            "monthlyPeak": "sensor.electricity_meter_maximum_demand_current_month",
+            "energyImportTariff1": "sensor.electricity_meter_energy_consumption_tarif_1",
+            "energyImportTariff2": "sensor.electricity_meter_energy_consumption_tarif_2",
+            "energyExportTariff1": "sensor.electricity_meter_energy_production_tarif_1",
+            "energyExportTariff2": "sensor.electricity_meter_energy_production_tarif_2",
+            "meterDataStaleSeconds": 90, "meterDataMaxEventSkewSeconds": 30,
+            "nightBaseline": { "enabled": true, "refreshAt": "06:00" },
+            "householdUse": {
+                "enabled": false, "topology": "", "generationSign": 0, "maxEventSkewSeconds": 5
+            }
+        },
         "decision": {
             "safetyMarginW": 300, "stableDurationSeconds": 300, "staleAfterSeconds": 30,
             "minimumExportW": 100, "hysteresisW": 150, "excellentExtraW": 1000,
@@ -175,7 +196,7 @@ impl SolarConfig {
             }
         }
         let mut config = defaults.clone();
-        for section in ["energySource", "inverterSource", "decision", "location", "devicePower"] {
+        for section in ["energySource", "inverterSource", "homeAssistant", "decision", "location", "devicePower"] {
             if let Some(value) = input.get(section) {
                 let given = object(value, section)?;
                 let target = config.get_mut(section).unwrap().as_object_mut().unwrap();
@@ -183,7 +204,21 @@ impl SolarConfig {
                     if !target.contains_key(key) {
                         return fail(format!("Unknown {section} setting: {key}"));
                     }
-                    target.insert(key.clone(), value.clone());
+                    if section == "homeAssistant" && key == "householdUse" {
+                        let given_household = object(value, "homeAssistant.householdUse")?;
+                        let household = target
+                            .get_mut(key)
+                            .and_then(Value::as_object_mut)
+                            .expect("default householdUse is an object");
+                        for (household_key, household_value) in given_household {
+                            if !household.contains_key(household_key) {
+                                return fail(format!("Unknown homeAssistant.householdUse setting: {household_key}"));
+                            }
+                            household.insert(household_key.clone(), household_value.clone());
+                        }
+                    } else {
+                        target.insert(key.clone(), value.clone());
+                    }
                 }
             }
         }
@@ -212,7 +247,8 @@ impl SolarConfig {
         let kind = match source["type"].as_str() {
             Some("mock") => SourceKind::Mock,
             Some("slimmelezer") => SourceKind::SlimmeLezer,
-            _ => return fail("energySource.type must be mock or slimmelezer"),
+            Some("home-assistant") => SourceKind::HomeAssistant,
+            _ => return fail("energySource.type must be mock, slimmelezer or home-assistant"),
         };
         let Some(host) = source["host"].as_str().filter(|h| valid_meter_host(h)) else {
             return fail("Invalid meter host");
@@ -334,6 +370,7 @@ impl SolarConfig {
         }
 
         Ok(SolarConfig {
+            home_assistant: crate::home_assistant::HaConfig::from_json(&config["homeAssistant"])?,
             energy_source: EnergySource {
                 kind,
                 host: host.to_string(),
@@ -361,7 +398,7 @@ impl SolarConfig {
         let d = &self.decision;
         let appliances: Map<String, Value> =
             self.appliances.iter().map(|(id, a)| (id.clone(), json!({ "name": a.name, "peakW": a.peak_w }))).collect();
-        json!({
+        let mut value = json!({
             "energySource": {
                 "type": self.energy_source.kind.as_str(),
                 "host": self.energy_source.host,
@@ -389,7 +426,12 @@ impl SolarConfig {
                 "sleepEnd": self.device_power.sleep_end
             },
             "appliances": appliances
-        })
+        });
+        // Keep legacy full configuration/compatibility fixtures unchanged.
+        if self.is_ha() || self.home_assistant != SolarConfig::default().home_assistant {
+            value["homeAssistant"] = self.home_assistant.to_json();
+        }
+        value
     }
 
     pub fn is_mock(&self) -> bool {
@@ -397,6 +439,10 @@ impl SolarConfig {
     }
 
     pub fn inverter_enabled(&self) -> bool {
-        !self.is_mock() && !self.inverter_source.host.is_empty()
+        !self.is_mock() && !self.is_ha() && !self.inverter_source.host.is_empty()
+    }
+
+    pub fn is_ha(&self) -> bool {
+        self.energy_source.kind == SourceKind::HomeAssistant
     }
 }

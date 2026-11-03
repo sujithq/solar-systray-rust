@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 /// Cumulative meter registers in watt-hours (1-0:1.8.1/2 import, 1-0:2.8.1/2 export).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnergyTotals {
     pub import_tariff1_wh: i64,

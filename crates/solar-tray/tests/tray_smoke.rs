@@ -329,3 +329,67 @@ fn native_tray_switches_sources_without_competing_for_the_meter() {
     assert!(unsafe { Shell_NotifyIconGetRect(&icon) }.is_err(), "quit removes the shell icon");
     eprintln!("PASS: graceful quit removes the tray icon");
 }
+
+#[test]
+#[ignore = "requires an interactive Windows desktop with Explorer and no other Solar Systray instance"]
+fn native_ha_mode_never_opens_agent_or_device_connections_on_start_or_ticks() {
+    assert!(
+        unsafe { FindWindowW(w!("SolarSystrayWindow"), PCWSTR::null()) }.is_err(),
+        "quit your existing Solar Systray before running this opt-in test"
+    );
+    let dir = TestDirectory::new();
+    let forbidden = Arc::new(AtomicUsize::new(0));
+    let forbidden_server = {
+        let count = forbidden.clone();
+        Server::start(move |_, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let ha_connections = Arc::new(AtomicUsize::new(0));
+    let ha = {
+        let count = ha_connections.clone();
+        Server::start(move |stream, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tungstenite::accept(stream).unwrap();
+            ws.send(tungstenite::Message::Text(json!({"type":"auth_required"}).to_string().into())).unwrap();
+            let auth: serde_json::Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(auth["access_token"], "synthetic-ha-token");
+            ws.send(tungstenite::Message::Text(
+                json!({"type":"auth_invalid","message":"synthetic-ha-token"}).to_string().into(),
+            ))
+            .unwrap();
+        })
+    };
+    let info = dir.0.join("agent-info.json");
+    forbidden_server.write_info(&info);
+    let config_dir = dir.0.join("Solar Systray");
+    std::fs::create_dir(&config_dir).unwrap();
+    let path = config_dir.join("config.json");
+    let saved = json!({"solar":{
+        "energySource":{"type":"home-assistant","host":"127.0.0.1","port":forbidden_server.address.port()},
+        "inverterSource":{"host":"127.0.0.1","port":forbidden_server.address.port()},
+        "homeAssistant":{"endpoint":format!("ws://127.0.0.1:{}/api/websocket",ha.address.port()),"tokenEnv":"SOLAR_HA_SMOKE_TOKEN"}
+    },"tray":{"notifications":{"enabled":false}}});
+    std::fs::write(&path, saved.to_string()).unwrap();
+    let mut tray = Tray {
+        child: Command::new(env!("CARGO_BIN_EXE_solar-systray"))
+            .env("LOCALAPPDATA", &dir.0)
+            .env("SOLAR_AGENT_SETTINGS_INFO", &info)
+            .env("SOLAR_HA_SMOKE_TOKEN", "synthetic-ha-token")
+            .spawn()
+            .unwrap(),
+    };
+    wait_for("the HA-only native tray icon", 10, || {
+        tray.icon().is_some_and(|id| unsafe { Shell_NotifyIconGetRect(&id) }.is_ok())
+    });
+    wait_for("HA authentication attempt", 5, || ha_connections.load(Ordering::SeqCst) > 0);
+    thread::sleep(Duration::from_secs(2));
+    let menu = tray.menu();
+    assert!(menu.contains("Home Assistant") && menu.contains("ha-auth-rejected"), "{menu}");
+    assert!(!menu.contains("synthetic-ha-token"), "credentials/server messages never enter the menu");
+    assert_eq!(forbidden.load(Ordering::SeqCst), 0, "HA startup bypasses Agent/device workers");
+    thread::sleep(Duration::from_millis(ABSENT_GRACE_MS as u64 + 1500));
+    assert_eq!(forbidden.load(Ordering::SeqCst), 0, "HA auth failure/ticks never activate fallback");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), saved.to_string(), "settings retained");
+    tray.quit();
+}

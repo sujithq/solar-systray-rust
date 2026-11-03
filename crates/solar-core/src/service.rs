@@ -20,7 +20,7 @@ pub struct SolarService {
     stop: Arc<AtomicBool>,
 }
 
-fn lock(runtime: &Mutex<Runtime>) -> MutexGuard<'_, Runtime> {
+pub(crate) fn lock(runtime: &Mutex<Runtime>) -> MutexGuard<'_, Runtime> {
     runtime.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -39,7 +39,14 @@ pub(crate) fn pause(stop: &AtomicBool, duration: Duration) -> bool {
 
 impl SolarService {
     pub fn start(config: SolarConfig) -> Self {
+        Self::start_with_baseline_store(config, None)
+    }
+
+    pub fn start_with_baseline_store(config: SolarConfig, baseline_path: Option<std::path::PathBuf>) -> Self {
         let mock = config.is_mock();
+        let ha = config.is_ha().then(|| config.home_assistant.clone());
+        let baseline_config = (config.is_ha() && config.home_assistant.night_baseline_enabled).then(|| config.clone());
+        let daily_config = (config.is_ha() && !config.home_assistant.atomic_grid.is_empty()).then(|| config.clone());
         let inverter = config.inverter_enabled().then(|| config.inverter_source.clone());
         let source = (config.energy_source.host.clone(), config.energy_source.port);
         let runtime = Arc::new(Mutex::new(Runtime::new(config)));
@@ -47,9 +54,46 @@ impl SolarService {
         let spawn = |name: &str, body: Box<dyn FnOnce() + Send>| {
             thread::Builder::new().name(name.into()).spawn(body).expect("spawn worker thread");
         };
+        if let Some(config) = baseline_config {
+            if let Some(path) = baseline_path.clone() {
+                let mut status = crate::ha_baseline::HistoryStatus::default();
+                match crate::ha_baseline::load_cache(&path, &config, now_ms()) {
+                    Ok(baseline) => status.baseline = baseline,
+                    Err(issue) => status.issue = Some(issue.into()),
+                }
+                lock(&runtime).set_baseline_history(status.clone());
+                let (runtime, stop) = (runtime.clone(), stop.clone());
+                spawn(
+                    "solar-ha-history",
+                    Box::new(move || crate::ha_baseline::worker(&runtime, &stop, &path, &config, status)),
+                );
+            } else {
+                lock(&runtime).set_baseline_history(crate::ha_baseline::HistoryStatus {
+                    baseline: None,
+                    issue: Some("history-persistence-not-configured".into()),
+                });
+            }
+        }
+        if let Some(config) = daily_config {
+            let path = baseline_path.map(|path| path.with_extension("daily-energy.json"));
+            if let Some(path) = &path {
+                match crate::ha_daily::load_cache(path, &config, now_ms()) {
+                    Ok(Some(baseline)) => lock(&runtime).restore_daily_baseline(baseline),
+                    Ok(None) => {}
+                    Err(issue) => lock(&runtime).daily_history_issue(issue),
+                }
+            }
+            let (runtime, stop) = (runtime.clone(), stop.clone());
+            spawn(
+                "solar-ha-daily-history",
+                Box::new(move || crate::ha_daily::worker(&runtime, &stop, path.as_deref(), &config)),
+            );
+        }
         {
             let (runtime, stop) = (runtime.clone(), stop.clone());
-            if mock {
+            if let Some(ha) = ha {
+                spawn("solar-ha", Box::new(move || crate::home_assistant::worker(&runtime, &stop, &ha)));
+            } else if mock {
                 spawn("solar-simulator", Box::new(move || simulator(&runtime, &stop)));
             } else {
                 spawn("solar-meter", Box::new(move || meter(&runtime, &stop, &source.0, source.1)));
@@ -82,7 +126,8 @@ impl SolarService {
         lock(&self.runtime).set_simulated_watts(watts, now_ms())
     }
 
-    /// Signals the threads to stop; they exit within about a second without being joined.
+    /// Signals workers to stop without joining. Reads wake in 500 ms; a pending
+    /// HA connect/upgrade can take its bounded connect/handshake deadline to exit.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }

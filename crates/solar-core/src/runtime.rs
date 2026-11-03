@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 pub enum Meter {
     Mock(MockProvider),
     SlimmeLezer(SlimmeLezer),
+    HomeAssistant(Box<crate::home_assistant::HaState>),
 }
 
 /// What the tray shows. It deserializes from a Solar Agent snapshot too; that has no
@@ -27,6 +28,16 @@ pub struct Snapshot {
     pub evaluation: Evaluation,
     pub peak_forecast: Forecast,
     pub daily_energy: DailyEnergyResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_coverage: Option<crate::ha_daily::DailyCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_history_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_energy_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_history: Option<crate::ha_reported_energy::HistoryProgress>,
     pub simulated: bool,
     pub scenario: Option<String>,
     pub simulated_w: Option<i64>,
@@ -37,12 +48,18 @@ pub struct Snapshot {
     pub sunrise: Option<i64>,
     pub sunset: Option<i64>,
     pub diagnostics: MeterStats,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_assistant: Option<crate::home_assistant::HaDiagnostics>,
     pub meter_address: Option<String>,
     pub inverter_address: Option<String>,
     pub inverter: InverterSnapshot,
     pub night_baseline_w: Option<f64>,
     pub night_baseline_learned: bool,
     pub night_baseline_samples: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_baseline_history: Option<crate::ha_baseline::HistoryStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub night_history_coverage: Option<crate::ha_baseline::NightCoverage>,
     pub reading_at: Option<i64>,
     pub checked_at: i64,
 }
@@ -65,18 +82,33 @@ pub struct Runtime {
     engine: DecisionEngine,
     forecaster: PeakForecaster,
     daily_energy: DailyEnergy,
+    ha_daily: Option<crate::ha_daily::HaDaily>,
+    reported_energy: Option<crate::ha_reported_energy::ReportedEnergy>,
+    reported_energy_issue: Option<String>,
+    reported_history: Option<crate::ha_reported_energy::HistoryProgress>,
     night_baseline: NightBaseline,
+    baseline_history: Option<crate::ha_baseline::HistoryStatus>,
+    night_history_coverage: Option<crate::ha_baseline::NightCoverage>,
     sun_times: Option<(i64, SunTimes)>,
 }
 
 impl Runtime {
     pub fn new(config: SolarConfig) -> Self {
-        let meter = if config.is_mock() {
+        let meter = if config.is_ha() {
+            Meter::HomeAssistant(Box::new(crate::home_assistant::HaState::new(config.home_assistant.clone())))
+        } else if config.is_mock() {
             Meter::Mock(MockProvider::new())
         } else {
             Meter::SlimmeLezer(SlimmeLezer::new(config.energy_source.allow_legacy_without_crc))
         };
+        let baseline_history = (config.is_ha() && config.home_assistant.night_baseline_enabled)
+            .then(crate::ha_baseline::HistoryStatus::default);
         Runtime {
+            ha_daily: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty()).then(Default::default),
+            reported_energy: None,
+            reported_energy_issue: (config.is_ha() && !config.home_assistant.atomic_grid.is_empty())
+                .then(|| "reported-energy-waiting-for-transport".into()),
+            reported_history: None,
             engine: DecisionEngine::new(config.clone()),
             config,
             meter,
@@ -84,12 +116,89 @@ impl Runtime {
             forecaster: PeakForecaster::new(),
             daily_energy: DailyEnergy::new(),
             night_baseline: NightBaseline::new(),
+            baseline_history,
+            night_history_coverage: None,
             sun_times: None,
         }
     }
 
     pub fn config(&self) -> &SolarConfig {
         &self.config
+    }
+
+    pub(crate) fn set_baseline_history(&mut self, status: crate::ha_baseline::HistoryStatus) {
+        self.baseline_history = Some(status);
+    }
+
+    pub(crate) fn set_night_coverage(&mut self, coverage: crate::ha_baseline::NightCoverage) {
+        self.night_history_coverage = Some(coverage);
+    }
+
+    pub(crate) fn restore_daily_baseline(&mut self, baseline: crate::ha_daily::CounterBaseline) {
+        if let Some(daily) = &mut self.ha_daily {
+            daily.restore(baseline);
+        }
+    }
+
+    pub(crate) fn daily_history_request(&mut self, now: i64) -> Option<crate::ha_daily::HistoryRequest> {
+        self.ha_daily.as_mut()?.request(now)
+    }
+
+    pub(crate) fn complete_daily_history(
+        &mut self,
+        request: &crate::ha_daily::HistoryRequest,
+        result: Result<crate::ha_daily::CounterBaseline, &'static str>,
+    ) {
+        if let Some(daily) = &mut self.ha_daily {
+            daily.complete(request, result);
+        }
+    }
+
+    pub(crate) fn daily_counter_baseline(&self) -> Option<crate::ha_daily::CounterBaseline> {
+        self.ha_daily.as_ref()?.baseline()
+    }
+
+    pub(crate) fn daily_history_issue(&mut self, issue: &'static str) {
+        if let Some(daily) = &mut self.ha_daily {
+            daily.set_issue(issue);
+        }
+    }
+
+    pub(crate) fn set_reported_energy(
+        &mut self,
+        result: Result<crate::ha_reported_energy::ReportedEnergy, &'static str>,
+        now: i64,
+    ) {
+        match result {
+            Ok(value)
+                if crate::ha_daily::day_bounds(value.as_of) == crate::ha_daily::day_bounds(now)
+                    && value.as_of <= now =>
+            {
+                self.reported_energy = Some(value);
+                self.reported_energy_issue = None;
+            }
+
+            Ok(_) => self.reported_energy_issue = Some("reported-energy-old-day-result".into()),
+            Err(issue) => self.reported_energy_issue = Some(issue.into()),
+        }
+    }
+
+    pub(crate) fn reported_history_ready(&self, now: i64) -> bool {
+        match &self.meter {
+            Meter::HomeAssistant(state) => {
+                let diagnostics = state.diagnostics(now, self.config.decision.stale_after_seconds);
+                diagnostics.connected && diagnostics.initialized
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn begin_reported_history(&mut self) {
+        self.reported_energy_issue = Some("reported-energy-loading".into());
+    }
+
+    pub(crate) fn reported_history_progress(&mut self, status: crate::ha_reported_energy::HistoryProgress) {
+        self.reported_history = Some(status);
     }
 
     pub fn appliance(&self) -> &str {
@@ -99,7 +208,7 @@ impl Runtime {
     fn mock(&self) -> Option<&MockProvider> {
         match &self.meter {
             Meter::Mock(mock) => Some(mock),
-            Meter::SlimmeLezer(_) => None,
+            Meter::SlimmeLezer(_) | Meter::HomeAssistant(_) => None,
         }
     }
 
@@ -114,6 +223,60 @@ impl Runtime {
     pub fn invalidate(&mut self) {
         self.engine.reset();
         self.forecaster.reset();
+    }
+
+    pub fn ha_connected(&mut self) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.connected();
+        }
+    }
+
+    pub fn ha_disconnect(&mut self, issue: &str) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.disconnect(issue);
+            self.invalidate();
+            self.daily_energy.reset();
+            if let Some(daily) = &mut self.ha_daily {
+                daily.invalidate_live("daily-history-disconnected");
+            }
+        }
+    }
+
+    pub fn ha_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
+        let Meter::HomeAssistant(state) = &mut self.meter else { return };
+        state.state(id, value, now);
+        let reset = state.take_atomic_reset();
+        let mut reading = state.grid(now, self.config.decision.stale_after_seconds);
+        if let Some(reading) = &mut reading {
+            state.enrich_reading(reading, now);
+        }
+        if let Some(daily) = &mut self.ha_daily {
+            if let Some(point) = state.counter_sample(now) {
+                daily.observe(point);
+            } else {
+                daily.invalidate_live("daily-history-live-unavailable");
+            }
+        }
+        if reset {
+            self.invalidate();
+            self.daily_energy.reset();
+        }
+        match reading {
+            Some(reading) => self.observe(&reading, now),
+            None => self.invalidate(),
+        }
+    }
+
+    pub fn ha_ready(&mut self) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.ready();
+        }
+    }
+
+    pub fn ha_snapshot_state(&mut self, id: &str, value: &serde_json::Value, now: i64) {
+        if let Meter::HomeAssistant(state) = &mut self.meter {
+            state.snapshot_state(id, value, now);
+        }
     }
 
     pub fn observe(&mut self, reading: &Reading, now: i64) {
@@ -143,7 +306,13 @@ impl Runtime {
     // Every reading feeds the forecaster so its hold time follows the meter clock, not polling.
     fn forecast(&mut self, reading: Option<&Reading>, now: i64) -> Forecast {
         let fresh = self.fresh(reading, now);
-        self.forecaster.update(Some(&peak_forecast_sample(reading, fresh)))
+        let forecast = self.forecaster.update(Some(&peak_forecast_sample(reading, fresh)));
+        if let Meter::HomeAssistant(state) = &self.meter
+            && let Some(issue) = state.peak_data_issue(now)
+        {
+            return Forecast::unavailable(issue);
+        }
+        forecast
     }
 
     // Crossings move by about a minute a day, so they are worked out once a minute.
@@ -220,6 +389,9 @@ impl Runtime {
     }
 
     fn inverter_snapshot(&self, now: i64) -> InverterSnapshot {
+        if let Meter::HomeAssistant(state) = &self.meter {
+            return state.inverter(now);
+        }
         let Some(mock) = self.mock() else {
             return self.inverter.snapshot(self.config.inverter_enabled(), now);
         };
@@ -248,7 +420,12 @@ impl Runtime {
         fresh: bool,
         sun: Sun,
         inverter: &InverterSnapshot,
+        now: i64,
     ) -> Option<f64> {
+        if self.config.is_ha() {
+            let Meter::HomeAssistant(state) = &self.meter else { return None };
+            return state.household_use(reading, now, self.config.decision.stale_after_seconds).ok();
+        }
         let reading = reading.filter(|_| fresh && !self.config.is_mock())?;
         if sun == Sun::Down {
             return Some(reading.grid_import_w);
@@ -262,22 +439,34 @@ impl Runtime {
     // ---- Snapshot and controls ----
 
     pub fn snapshot(&mut self, now: i64) -> Snapshot {
-        let reading = match &mut self.meter {
+        let mut reading = match &mut self.meter {
             Meter::Mock(mock) => mock.latest().cloned(),
+            Meter::HomeAssistant(state) => {
+                let mut reading = state.grid(now, self.config.decision.stale_after_seconds);
+                if let Some(reading) = &mut reading {
+                    state.enrich_reading(reading, now);
+                }
+                reading
+            }
             Meter::SlimmeLezer(link) => {
                 let (reading, events) = link.latest(now);
                 self.dispatch(events, now);
                 reading
             }
         };
+        if let (Meter::HomeAssistant(_), Some(reading)) = (&self.meter, reading.as_mut()) {
+            self.daily_energy.update(Some(reading), true);
+        }
         let reading = reading.as_ref();
         let fresh = self.fresh(reading, now);
         let evaluation = self.evaluate(reading, now);
         let mut inverter = self.inverter_snapshot(now);
-        let household = self.household_use(reading, fresh, evaluation.sun, &inverter);
+        let household = self.household_use(reading, fresh, evaluation.sun, &inverter, now);
         inverter.household_use_w = household;
         let (night_baseline_w, night_baseline_learned, night_baseline_samples) = if self.config.is_mock() {
             (None, false, 0)
+        } else if let Some(history) = &self.baseline_history {
+            (Some(history.watts()), history.baseline.is_some(), history.baseline.as_ref().map_or(0, |b| b.samples))
         } else {
             let watts = if evaluation.sun == Sun::Down {
                 reading.filter(|_| fresh).map(|r| r.grid_import_w)
@@ -288,11 +477,26 @@ impl Runtime {
             (Some(state.baseline_w), state.learned, state.samples)
         };
         let peak_forecast = self.forecast(reading, now);
+        let home_assistant = match &self.meter {
+            Meter::HomeAssistant(state) => Some(state.diagnostics(now, self.config.decision.stale_after_seconds)),
+            _ => None,
+        };
+        let daily_energy = match &self.meter {
+            Meter::HomeAssistant(state) => {
+                state.daily_data_issue(now).map(DailyEnergyResult::unavailable).unwrap_or_else(|| {
+                    self.ha_daily
+                        .as_ref()
+                        .map_or_else(|| self.daily_energy.current(fresh), |daily| daily.current(fresh))
+                })
+            }
+            _ => self.daily_energy.current(fresh),
+        };
         let times = self.sun_times(now);
         let mock = self.mock();
         let diagnostics = match &self.meter {
             Meter::Mock(_) => MeterStats { simulated: true, ..MeterStats::default() },
             Meter::SlimmeLezer(link) => link.stats().clone(),
+            Meter::HomeAssistant(state) => state.stats.clone(),
         };
         let presets = if mock.is_some() {
             simulation_presets(&self.config.decision, &self.config.appliances[&evaluation.appliance])
@@ -301,7 +505,16 @@ impl Runtime {
         };
         Snapshot {
             peak_forecast,
-            daily_energy: self.daily_energy.current(fresh),
+            daily_energy,
+            daily_coverage: self.ha_daily.as_ref().and_then(|daily| daily.coverage()),
+            daily_history_issue: self.ha_daily.as_ref().and_then(|daily| daily.history_issue().map(str::to_string)),
+            reported_energy: self
+                .reported_energy
+                .as_ref()
+                .filter(|value| crate::ha_daily::day_bounds(value.as_of) == crate::ha_daily::day_bounds(now))
+                .cloned(),
+            reported_energy_issue: self.reported_energy_issue.clone(),
+            reported_history: self.reported_history.clone(),
             simulated: self.config.is_mock(),
             scenario: mock.map(|m| m.scenario().to_string()),
             simulated_w: mock.filter(|m| m.scenario() == "custom").and_then(MockProvider::watts),
@@ -311,8 +524,13 @@ impl Runtime {
             sunrise: times.sunrise,
             sunset: times.sunset,
             diagnostics,
-            meter_address: (!self.config.is_mock())
-                .then(|| format!("{}:{}", self.config.energy_source.host, self.config.energy_source.port)),
+            home_assistant,
+            meter_address: if self.config.is_ha() {
+                Some("Home Assistant".into())
+            } else {
+                (!self.config.is_mock())
+                    .then(|| format!("{}:{}", self.config.energy_source.host, self.config.energy_source.port))
+            },
             inverter_address: self
                 .config
                 .inverter_enabled()
@@ -321,6 +539,8 @@ impl Runtime {
             night_baseline_w,
             night_baseline_learned,
             night_baseline_samples,
+            night_baseline_history: self.baseline_history.clone(),
+            night_history_coverage: self.night_history_coverage.clone(),
             reading_at: reading.map(|r| r.timestamp),
             checked_at: now,
             evaluation,

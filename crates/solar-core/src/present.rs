@@ -71,6 +71,22 @@ pub fn forecast_reason_text(reason: &str) -> &'static str {
         "peak-reached" => "peak already reached",
         "implausible-demand" => "demand not as expected",
         "clock-jump" => "meter clock jumped",
+        "ha-meter-data-disconnected" => "Home Assistant disconnected",
+        "ha-meter-data-needs-atomic-grid" => "atomic meter clock required",
+        "ha-meter-data-grid-unavailable" => "atomic meter data unavailable",
+        "ha-meter-clock-unsupported" => "unsupported meter date",
+        "ha-meter-data-not-mapped" => "meter entity not mapped",
+        "ha-meter-data-invalid" => "invalid meter entity",
+        "ha-meter-data-no-acquisition-evidence" => "unchanged HA value; no acquisition evidence",
+        "ha-atomic-optional-not-published" => "atomic publisher has no optional-field contract",
+        "ha-atomic-optional-missing" => "required field missing from this telegram",
+        "ha-atomic-optional-invalid" => "invalid atomic optional field/status",
+        "ha-atomic-optional-previous-month" => "atomic peak belongs to a previous month",
+        "ha-meter-data-unavailable" => "meter entity unavailable",
+        "ha-meter-data-stale" => "meter entity state-change is stale",
+        "ha-meter-data-event-proximity" => "outside HA event-proximity window",
+        "ha-meter-data-month-boundary" => "peak belongs to another meter month",
+        "ha-meter-data-day-boundary" => "counter event belongs to another meter day",
         _ => "unavailable",
     }
 }
@@ -83,6 +99,22 @@ pub fn daily_reason_text(reason: &str) -> Option<&'static str> {
         "missing-or-invalid-totals" => "the meter sends no energy totals",
         "clock-discontinuity" => "the meter clock changed; totals restart tomorrow",
         "counter-decreased" => "a meter total went down; totals restart tomorrow",
+        "ha-meter-data-disconnected" => "Home Assistant is disconnected",
+        "ha-meter-data-needs-atomic-grid" => "an atomic meter sample is required",
+        "ha-meter-data-grid-unavailable" => "the atomic meter sample is unavailable",
+        "ha-meter-clock-unsupported" => "the meter timestamp is outside the supported calendar",
+        "ha-meter-data-not-mapped" => "one or more energy counters are not mapped",
+        "ha-meter-data-invalid" => "an energy counter is invalid",
+        "ha-meter-data-no-acquisition-evidence" => {
+            "unchanged counters have no acquisition evidence; atomic samples are required"
+        }
+        "ha-atomic-optional-not-published" => "atomic publisher has no optional-field contract",
+        "ha-atomic-optional-missing" => "one or more counters are missing from this telegram",
+        "ha-atomic-optional-invalid" => "invalid atomic counter/status",
+        "ha-meter-data-unavailable" => "an energy counter is unavailable",
+        "ha-meter-data-stale" => "an energy counter state-change is stale",
+        "ha-meter-data-event-proximity" => "counter events are outside the HA event-proximity window",
+        "ha-meter-data-day-boundary" => "counter event does not match the meter day",
         _ => return None,
     })
 }
@@ -166,6 +198,36 @@ pub fn headline(s: &Snapshot) -> Headline {
     make("NO SURPLUS".into(), need, Tone::Muted)
 }
 
+fn reported_inverter_status<'a>(ha: &'a crate::home_assistant::HaDiagnostics, id: &str) -> Option<&'a str> {
+    if !ha.connected {
+        Some("disconnected")
+    } else if !ha.initialized {
+        Some("initializing")
+    } else {
+        ha.entities.iter().find(|entity| entity.entity == id).and_then(|entity| entity.issue.as_deref())
+    }
+}
+
+fn reported_inverter_row(
+    ha: &crate::home_assistant::HaDiagnostics,
+    id: Option<&str>,
+    value: Option<f64>,
+) -> (String, Tone) {
+    let Some(id) = id else { return ("Not mapped".into(), Tone::Muted) };
+    let Some(value) = value else { return ("Unavailable (HA reported)".into(), Tone::Warn) };
+    let age = ha.entities.iter().find(|entity| entity.entity == id).and_then(|entity| entity.age_ms);
+    let age = age.map_or_else(|| "update age unknown".into(), |ms| format!("update age {:.1}s", ms as f64 / 1000.0));
+    let status = reported_inverter_status(ha, id);
+    let marker = match status {
+        Some("ha-entity-stale") => "; stale",
+        Some("disconnected") => "; disconnected cached",
+        Some("initializing") => "; initializing cached",
+        Some(_) => "; invalid/unavailable",
+        None => "",
+    };
+    (format!("{} (HA reported; {age}{marker})", kilowatts(value)), Tone::Warn)
+}
+
 fn power_rows(s: &Snapshot) -> Vec<Row> {
     let e = &s.evaluation;
     let mut rows = if live(s) {
@@ -177,19 +239,40 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
         vec![row("Grid export", "-- W", Tone::Muted), row("Grid import", "-- W", Tone::Muted)]
     };
     let inverter = &s.inverter;
-    match (inverter.status, inverter.pv_power_w) {
-        (InverterStatus::Disabled, _) => {}
-        (InverterStatus::Online, Some(pv)) => {
-            rows.push(row("Solar panels (PV)", kilowatts(pv), Tone::Text));
-            if let Some(ac) = inverter.active_power_w {
-                rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text));
-            }
-        }
-        (InverterStatus::Standby, _) => rows.push(row("Solar panels (PV)", "No reading (night)", Tone::Muted)),
-        _ => rows.push(row("Solar panels (PV)", "Sungrow unavailable", Tone::Warn)),
-    }
     let household = inverter.household_use_w.filter(|w| w.is_finite());
-    if let Some(household) = household {
+    if let Some(ha) = &s.home_assistant {
+        let ac = reported_inverter_row(ha, ha.active_power_entity.as_deref(), inverter.active_power_w);
+        rows.push(row("Inverter output (AC)", ac.0, ac.1));
+        let dc = reported_inverter_row(ha, ha.dc_power_entity.as_deref(), inverter.pv_power_w);
+        rows.push(row("Solar panels (DC)", dc.0, dc.1));
+        if ha.active_power_entity.is_some() || ha.dc_power_entity.is_some() {
+            rows.push(row("Inverter evidence", "HA reported; acquisition freshness unverified", Tone::Warn));
+        }
+        let household_row = household.map_or_else(
+            || {
+                let issue = ha.household_use_issue.as_deref();
+                let tone = if issue == Some("ha-household-disabled") { Tone::Muted } else { Tone::Warn };
+                (household_unavailable(issue).to_string(), tone)
+            },
+            |watts| (format!("{} (advisory)", kilowatts(watts)), Tone::Warn),
+        );
+        rows.push(row("Household use", household_row.0, household_row.1));
+    } else {
+        match (inverter.status, inverter.pv_power_w) {
+            (InverterStatus::Disabled, _) => {}
+            (InverterStatus::Online, Some(pv)) => {
+                rows.push(row("Solar panels (PV)", kilowatts(pv), Tone::Text));
+                if let Some(ac) = inverter.active_power_w {
+                    rows.push(row("Inverter output (AC)", kilowatts(ac), Tone::Text));
+                }
+            }
+            (InverterStatus::Standby, _) => rows.push(row("Solar panels (PV)", "No reading (night)", Tone::Muted)),
+            _ => rows.push(row("Solar panels (PV)", "Sungrow unavailable", Tone::Warn)),
+        }
+    }
+    if s.home_assistant.is_none()
+        && let Some(household) = household
+    {
         rows.push(row("Household use", kilowatts(household), Tone::Text));
     }
     if !s.simulated {
@@ -201,11 +284,26 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
                     let value = format!("{}{above} W", if above > 0 { "+" } else { "" });
                     rows.push(row("Extra vs night", value, if above >= 300 { Tone::Warn } else { Tone::Muted }));
                 }
+                None if s.home_assistant.is_some() => rows.push(row(
+                    "Extra vs night",
+                    household_unavailable(s.home_assistant.as_ref().and_then(|ha| ha.household_use_issue.as_deref())),
+                    Tone::Muted,
+                )),
                 None => rows.push(row("Extra vs night", "Unavailable (no inverter reading)", Tone::Muted)),
             }
         }
         let text = baseline.map_or_else(|| "Unavailable".to_string(), watts);
-        let state = if s.night_baseline_learned {
+        let state = if let Some(history) = &s.night_baseline_history {
+            if let Some(baseline) = &history.baseline {
+                if baseline.provenance == crate::ha_baseline::REPORTED_PROVENANCE {
+                    format!("{text} (reported-history estimate)")
+                } else {
+                    format!("{text} (recorded night)")
+                }
+            } else {
+                format!("{text} default; no valid recorded night")
+            }
+        } else if s.night_baseline_learned {
             format!("{text} (learned)")
         } else if !s.location_configured {
             format!("{text} default; set location to learn")
@@ -215,18 +313,116 @@ fn power_rows(s: &Snapshot) -> Vec<Row> {
             format!("{text} default; waiting for overnight data")
         };
         rows.push(row("Night baseline", state, Tone::Muted));
+        if let Some(coverage) = s
+            .night_history_coverage
+            .as_ref()
+            .or_else(|| s.night_baseline_history.as_ref()?.baseline.as_ref()?.coverage.as_ref())
+        {
+            rows.push(row(
+                "Queried night",
+                format!("{} - {}", meter_instant(coverage.window.start), meter_instant(coverage.window.end)),
+                Tone::Muted,
+            ));
+            let percent = if coverage.total_minutes == 0 {
+                0.0
+            } else {
+                coverage.valid_minutes as f64 * 100.0 / coverage.total_minutes as f64
+            };
+            rows.push(row(
+                "Recorded night coverage",
+                format!(
+                    "{}/{} fully available minutes ({percent:.2}%); {}; reported estimate requires >=95% and >=30 valid minutes",
+                    coverage.valid_minutes,
+                    coverage.total_minutes,
+                    if coverage.complete { "query complete" } else { "query incomplete" }
+                ),
+                Tone::Warn,
+            ));
+            rows.push(row(
+                "Recorded night outages",
+                format!(
+                    "{} intervals; {:.3}s unavailable; held chunk repeats not counted twice",
+                    coverage.unavailable_intervals,
+                    coverage.unavailable_ms as f64 / 1000.0
+                ),
+                Tone::Warn,
+            ));
+            rows.push(row("Queried night source", &coverage.source, Tone::Muted));
+            if let Some(issue) = &coverage.persistence_issue {
+                rows.push(row("Night coverage report", issue, Tone::Warn));
+            }
+        }
+        if let Some(history) = &s.night_baseline_history {
+            if let Some(issue) = &history.issue {
+                rows.push(row("Baseline status", issue, Tone::Warn));
+            }
+            if let Some(baseline) = &history.baseline {
+                let age_hours = (s.checked_at - baseline.window.end).max(0) as f64 / 3_600_000.0;
+                rows.push(row(
+                    "Baseline age",
+                    format!(
+                        "{age_hours:.1}h since night end{}",
+                        if age_hours > 36.0 { " (stale; retained)" } else { "" }
+                    ),
+                    if age_hours > 36.0 { Tone::Warn } else { Tone::Muted },
+                ));
+                let utc = |at| {
+                    chrono::DateTime::from_timestamp_millis(at)
+                        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+                        .unwrap_or_else(|| "Invalid date".into())
+                };
+                rows.push(row(
+                    "Baseline night",
+                    format!("{} - {}", utc(baseline.window.start), utc(baseline.window.end)),
+                    Tone::Muted,
+                ));
+                rows.push(row("Baseline source", &baseline.provenance, Tone::Muted));
+                rows.push(row(
+                    "Baseline samples",
+                    format!(
+                        "{} {}",
+                        baseline.samples,
+                        if baseline.provenance == crate::ha_baseline::REPORTED_PROVENANCE {
+                            "valid held minute-start values; outage-touched minutes excluded, not physical continuity"
+                        } else {
+                            "actual minute samples"
+                        }
+                    ),
+                    Tone::Muted,
+                ));
+            }
+        }
     }
     rows
+}
+
+fn household_unavailable(issue: Option<&str>) -> &'static str {
+    match issue {
+        Some("ha-household-disabled") => "Unavailable (disabled by configuration)",
+        Some("ha-household-event-skew") => "Unavailable (HA event proximity gate)",
+        Some("ha-household-ac-stale") => "Unavailable (AC HA update is stale)",
+        Some("ha-household-out-of-range") => "Unavailable (derived value out of range)",
+        Some("ha-household-topology" | "ha-household-mapping") => "Unavailable (topology/sign configuration required)",
+        Some("ha-household-disconnected" | "ha-household-grid-unavailable" | "ha-household-ac-unavailable") => {
+            "Unavailable (required input is stale or unavailable)"
+        }
+        _ => "Unavailable (HA household-use gates not met)",
+    }
 }
 
 fn peak_rows(s: &Snapshot) -> Vec<Row> {
     let e = &s.evaluation;
     let mut rows = Vec::new();
     if live(s)
-        && let (Some(demand), Some(peak)) = (e.current_demand_w, e.monthly_peak_w)
+        && let Some(demand) = e.current_demand_w
     {
         let tone = if e.monthly_peak_reached { Tone::Warn } else { Tone::Text };
         rows.push(row("Quarter-hour demand", kilowatts(demand), tone));
+    }
+    if live(s)
+        && let Some(peak) = e.monthly_peak_w
+    {
+        let tone = if e.monthly_peak_reached { Tone::Warn } else { Tone::Text };
         rows.push(row("Monthly peak", kilowatts(peak), tone));
     }
     let f = &s.peak_forecast;
@@ -261,25 +457,231 @@ fn peak_rows(s: &Snapshot) -> Vec<Row> {
 }
 
 fn today_rows(s: &Snapshot) -> Vec<Row> {
+    let mut rows = today_energy_rows(s);
+    if let Some(status) = &s.reported_history {
+        let running = matches!(status.phase.as_str(), "starting" | "connecting" | "authenticating" | "querying");
+        let elapsed = if running {
+            status.query_started_at.map_or(0, |at| (s.checked_at - at).max(0) as u64)
+        } else {
+            status.elapsed_ms
+        };
+        rows.push(row(
+            "History query",
+            format!(
+                "{}; {}/{} chunks; {}s elapsed",
+                status.phase,
+                status.completed_chunks,
+                status.total_chunks,
+                elapsed / 1000
+            ),
+            Tone::Muted,
+        ));
+        if let Some(issue) = &status.persistence_issue {
+            rows.push(row("History status report", issue, Tone::Warn));
+        }
+    }
+    rows
+}
+
+fn today_energy_rows(s: &Snapshot) -> Vec<Row> {
+    if let Some(reported) = &s.reported_energy {
+        let age = (s.checked_at - reported.as_of).max(0) / 1000;
+        let mut rows = vec![
+            row("Coverage", "HA recorded reported energy; held midnight boundary", Tone::Warn),
+            row("Imported", kilowatt_hours(reported.import_wh), Tone::Text),
+            row("Exported", kilowatt_hours(reported.export_wh), Tone::Text),
+            row("From", meter_instant(reported.day_start), Tone::Muted),
+            row("As of", meter_instant(reported.as_of), Tone::Muted),
+            row("Source", "Original HA tariff recorder states (kWh -> whole Wh); not atomic acquisition", Tone::Muted),
+            row("Boundary", "HA last recorded state held at midnight; physical boundary timing unverified", Tone::Warn),
+            row("Refresh age", format!("{age}s{}", if age > 120 { "; stale retained result" } else { "" }), Tone::Warn),
+        ];
+        let unavailable: u32 = reported.unavailable_rows.iter().sum();
+        if unavailable > 0 {
+            rows.push(row(
+                "Recorded gaps",
+                format!("{unavailable} unknown/unavailable tariff rows (including held repeats); reported endpoint deltas only; reset continuity across gaps unverified"),
+                Tone::Warn,
+            ));
+        }
+        if let Some(issue) = &s.reported_energy_issue {
+            rows.push(row("Recorded energy refresh", reported_energy_text(issue), Tone::Warn));
+        }
+        return rows;
+    }
     let d = &s.daily_energy;
     match (live(s) && d.available, d.import_wh, d.export_wh, d.since_minute) {
-        (true, Some(import), Some(export), Some(since)) => vec![
-            row("Imported", kilowatt_hours(import), Tone::Text),
-            row("Exported", kilowatt_hours(export), Tone::Text),
-            row("Since", format!("{} (meter time)", minute_text(since)), Tone::Muted),
-        ],
+        (true, Some(import), Some(export), Some(since)) => {
+            let mut rows = Vec::new();
+            if s.home_assistant.is_some() {
+                let midnight = s.daily_coverage.as_ref().is_some_and(|coverage| coverage.midnight);
+                rows.push(row(
+                    "Coverage",
+                    if midnight {
+                        "Today from validated Brussels midnight"
+                    } else {
+                        "Partial today; exact observed baseline"
+                    },
+                    if midnight { Tone::Text } else { Tone::Warn },
+                ));
+                if let Some(coverage) = &s.daily_coverage {
+                    rows.push(row("Baseline sample", meter_instant(coverage.since), Tone::Muted));
+                    rows.push(row("Through sample", meter_instant(coverage.through), Tone::Muted));
+                    rows.push(row("Counter source", &coverage.provenance, Tone::Muted));
+                }
+                if let Some(issue) = &s.daily_history_issue {
+                    rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+                }
+                if let Some(issue) = &s.reported_energy_issue {
+                    rows.push(row("HA reported energy", reported_energy_text(issue), Tone::Warn));
+                }
+            }
+            rows.extend([
+                row("Imported", kilowatt_hours(import), Tone::Text),
+                row("Exported", kilowatt_hours(export), Tone::Text),
+                row(
+                    "Since",
+                    format!(
+                        "{} ({})",
+                        minute_text(since),
+                        if s.home_assistant.is_some() { "meter local time" } else { "meter time" }
+                    ),
+                    Tone::Muted,
+                ),
+            ]);
+            rows
+        }
         _ => {
             let mut rows = vec![row("Daily energy", "Unavailable", if live(s) { Tone::Warn } else { Tone::Muted })];
             if let Some(why) = daily_reason_text(&d.reason) {
                 rows.push(row("Why", why, Tone::Muted));
+            }
+            if let Some(issue) = &s.daily_history_issue {
+                rows.push(row("Recorded baseline", daily_history_text(issue), Tone::Warn));
+            }
+            if let Some(issue) = &s.reported_energy_issue {
+                rows.push(row("HA reported energy", reported_energy_text(issue), Tone::Warn));
             }
             rows
         }
     }
 }
 
+fn reported_energy_text(issue: &str) -> &str {
+    match issue {
+        "reported-energy-waiting-for-transport" => {
+            "Pending: waiting for initialized HA transport/history worker; atomic totals are not full-day reported energy"
+        }
+        "reported-energy-loading" => {
+            "Loading original tariff recorder history (up to 180s); atomic fallback remains partial"
+        }
+        _ => issue,
+    }
+}
+
+fn meter_instant(at: i64) -> String {
+    let Some(c) = crate::home_assistant::belgian_meter_calendar(at) else { return "Unavailable".into() };
+    let (year, month, day) = crate::civil_from_days(c.day);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}.{:03} Europe/Brussels UTC+{:02}:00",
+        c.minute / 60,
+        c.minute % 60,
+        at.div_euclid(1000).rem_euclid(60),
+        at.rem_euclid(1000),
+        c.offset_minutes / 60
+    )
+}
+
+fn daily_history_text(issue: &str) -> &str {
+    match issue {
+        "daily-history-no-midnight-sample" => "No exact midnight counter sample; partial coverage only",
+        "daily-history-missing-atomic-counters" => "Recorded samples lack valid atomic counters; partial coverage only",
+        "daily-history-gap" | "daily-history-sequence-gap" => "Counter history has a gap; partial coverage only",
+        "daily-history-counter-decreased" => "Counter reset/decrease; no arithmetic across reset",
+        "daily-history-session-changed" => "Publisher session changed; partial coverage only",
+        "daily-history-loading" => "Checking recorded midnight/continuity",
+        "daily-history-cache-awaiting-bridge" => "Saved baseline awaiting a recorded bridge to live counters",
+        "daily-history-anchor-not-recorded" => "Live anchor not yet in recorder; partial coverage only",
+        _ => issue,
+    }
+}
+
 fn connection_rows(s: &Snapshot) -> Vec<Row> {
     let mut rows = vec![row("Sun", format!("Sunrise {} | Sunset {}", clock(s.sunrise), clock(s.sunset)), Tone::Muted)];
+    if let Some(ha) = &s.home_assistant {
+        rows.push(row("Source", "Home Assistant (WebSocket only; no fallback)", Tone::Text));
+        rows.push(row(
+            "HA transport",
+            if ha.connected { "Authenticated" } else { "Disconnected" },
+            if ha.connected { Tone::Good } else { Tone::Bad },
+        ));
+        rows.push(row(
+            "Initialization",
+            if ha.initialized { "Subscribed and initialized" } else { "Awaiting auth/subscription/snapshot" },
+            Tone::Muted,
+        ));
+        rows.push(row("Evidence", &ha.evidence, Tone::Warn));
+        rows.push(row(
+            "Meter calendar",
+            "Atomic UTC timestamp converted to Europe/Brussels local time (DST-aware)",
+            Tone::Muted,
+        ));
+        rows.push(row(
+            "Optional meter evidence",
+            "Same accepted atomic telegram; missing/invalid fields never carried forward",
+            Tone::Warn,
+        ));
+        if let Some(issue) = &s.diagnostics.last_issue {
+            rows.push(row("Grid status", issue, Tone::Warn));
+        }
+        if let Some(issue) = &ha.peak_forecast_issue {
+            rows.push(row("Quarter-hour data", issue, Tone::Warn));
+        }
+        if let Some(issue) = &ha.daily_energy_issue {
+            rows.push(row("Daily energy data", issue, Tone::Warn));
+        }
+        for entity in &ha.entities {
+            let inverter = ha.active_power_entity.as_deref() == Some(&entity.entity)
+                || ha.dc_power_entity.as_deref() == Some(&entity.entity);
+            let value = if inverter {
+                let age = entity.age_ms.map_or_else(|| "unknown".into(), |ms| format!("{:.1}s", ms as f64 / 1000.0));
+                format!(
+                    "HA last_updated age {age}; {}",
+                    entity.issue.as_deref().unwrap_or("reported; acquisition unverified")
+                )
+            } else {
+                entity.issue.clone().unwrap_or_else(|| match entity.age_ms {
+                    Some(ms) if entity.sample_sequence.is_some() => format!("Telegram age {:.1}s", ms as f64 / 1000.0),
+                    Some(ms) => format!("Last-known HA state-change age {:.1}s", ms as f64 / 1000.0),
+                    None => "Unavailable".into(),
+                })
+            };
+            rows.push(row(&entity.entity, value, if entity.issue.is_some() { Tone::Warn } else { Tone::Muted }));
+            if let Some(sequence) = entity.sample_sequence {
+                rows.push(row("Atomic sample sequence", sequence.to_string(), Tone::Muted));
+            }
+        }
+        if ha.active_power_entity.is_some() || ha.dc_power_entity.is_some() {
+            rows.push(row(
+                "Inverter freshness",
+                "HA last_updated only; acquisition freshness unverified (acquisition timestamp unavailable)",
+                Tone::Warn,
+            ));
+        }
+        let household_status = if !ha.household_use_enabled {
+            "Disabled by default; explicit topology/sign opt-in required"
+        } else if ha.household_use_issue.is_none() {
+            "Enabled advisory estimate; HA update-age/proximity gates passed, acquisition freshness unverified"
+        } else {
+            household_unavailable(ha.household_use_issue.as_deref())
+        };
+        rows.push(row(
+            "Household calculation",
+            household_status,
+            if ha.household_use_enabled { Tone::Warn } else { Tone::Muted },
+        ));
+        return rows;
+    }
     match &s.meter_address {
         None => rows.push(row("Meter", "Simulated", Tone::Muted)),
         Some(address) => {
@@ -346,7 +748,22 @@ pub fn tooltip(s: &Snapshot) -> String {
             Some(import) if import > 0.0 => format!("Import {}", watts(import)),
             _ => format!("Export {}", watts(e.surplus_w.unwrap_or(0.0))),
         };
-        if let (InverterStatus::Online, Some(pv)) = (s.inverter.status, s.inverter.pv_power_w) {
+        if let Some(ha) = &s.home_assistant {
+            for (name, id, value) in [
+                ("AC", ha.active_power_entity.as_deref(), s.inverter.active_power_w),
+                ("DC", ha.dc_power_entity.as_deref(), s.inverter.pv_power_w),
+            ] {
+                if let (Some(id), Some(value)) = (id, value) {
+                    let status = match reported_inverter_status(ha, id) {
+                        None => "unverified",
+                        Some("ha-entity-stale") => "stale",
+                        Some("disconnected") => "disconnected",
+                        _ => "unavailable",
+                    };
+                    power.push_str(&format!(" | {name} reported {} ({status})", kilowatts(value)));
+                }
+            }
+        } else if let (InverterStatus::Online, Some(pv)) = (s.inverter.status, s.inverter.pv_power_w) {
             power.push_str(&format!(" | PV {}", kilowatts(pv)));
         }
         lines.push(power);
@@ -368,9 +785,20 @@ pub fn tooltip(s: &Snapshot) -> String {
             lines.push(format!("Quarter {} / {}", kilowatts(projected), kilowatts(comparison)));
         }
         let d = &s.daily_energy;
-        if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
+        if let Some(reported) = &s.reported_energy {
             lines.push(format!(
-                "Today in {} / out {}",
+                "HA reported in {} / out {}",
+                kilowatt_hours(reported.import_wh).trim_end_matches(" kWh"),
+                kilowatt_hours(reported.export_wh)
+            ));
+        } else if let (true, Some(import), Some(export)) = (d.available, d.import_wh, d.export_wh) {
+            lines.push(format!(
+                "{} in {} / out {}",
+                if s.home_assistant.is_some() && !s.daily_coverage.as_ref().is_some_and(|coverage| coverage.midnight) {
+                    "Partial today"
+                } else {
+                    "Today"
+                },
                 kilowatt_hours(import).trim_end_matches(" kWh"),
                 kilowatt_hours(export)
             ));
