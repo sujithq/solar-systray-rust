@@ -3,6 +3,9 @@ version: 0.1.0
 description: Shared Solar contributor tooling for the native Windows tray.
 license: MIT
 targets: [copilot]
+compilation:
+  agents_md:
+    mode: managed_section
 dependencies:
   apm:
-    - sujithq/solar-home/packages/solar-dev
+    - sujithq/solar-home/packages/solar-dev#5d15cb83d81f25cf5ddf4db4bc10f7e0dd2047b7

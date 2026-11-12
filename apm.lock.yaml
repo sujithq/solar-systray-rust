@@ -1,0 +1,145 @@
+lockfile_version: '1'
+generated_at: '2026-11-12T13:25:34.434352+00:00'
+apm_version: 0.29.0
+dependencies:
+- repo_url: sujithq/solar-home
+  name: solar-dev
+  host: github.com
+  resolved_commit: 5d15cb83d81f25cf5ddf4db4bc10f7e0dd2047b7
+  resolved_ref: 5d15cb83d81f25cf5ddf4db4bc10f7e0dd2047b7
+  version: 0.1.0
+  virtual_path: packages/solar-dev
+  is_virtual: true
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/solar-acceptance-handoff
+  - .agents/skills/solar-acceptance-handoff/SKILL.md
+  - .agents/skills/solar-environment-preflight
+  - .agents/skills/solar-environment-preflight/SKILL.md
+  - .agents/skills/solar-feature-spec
+  - .agents/skills/solar-feature-spec/SKILL.md
+  - .agents/skills/solar-feature-spec/references/indicator-example.md
+  - .agents/skills/solar-ha-contract
+  - .agents/skills/solar-ha-contract/SKILL.md
+  - .agents/skills/solar-ha-contract/references/contract.md
+  - .github/agents/ha-contract-reviewer.agent.md
+  - .github/agents/solar-acceptance-reviewer.agent.md
+  deployed_file_hashes:
+    .agents/skills/solar-acceptance-handoff/SKILL.md: sha256:c82d4cb989262f69d697aeb9e61f2ffb7a4cf8fc828e9b9072c9bf7cfc11cec8
+    .agents/skills/solar-environment-preflight/SKILL.md: sha256:c4c84af5f9e8ddae41ba9c297c64f9f9f1e2cfddfc96e14839d1e1868a84bdef
+    .agents/skills/solar-feature-spec/SKILL.md: sha256:c6ddc3b408257085aabd26707ad7caff6d060fa753762c08da69205448e65817
+    .agents/skills/solar-feature-spec/references/indicator-example.md: sha256:68d4c32945fa8f851cf30ded375d602092e0783fcc17dee8ab125b67c1c41806
+    .agents/skills/solar-ha-contract/SKILL.md: sha256:b69b9ac67977c8d8e52fce81490445ffa2f2e5c6f79473c86d7f86cbfa26ccf3
+    .agents/skills/solar-ha-contract/references/contract.md: sha256:ddd222553fd4a19b19828c41c5e6e3dc6ffc98402cfa767dbe78b0186def2e06
+    .github/agents/ha-contract-reviewer.agent.md: sha256:be6a002c667f9a779b457320d12e6d55548c78f188755b5f764e828138d36bfa
+    .github/agents/solar-acceptance-reviewer.agent.md: sha256:54009ab8434d29e043d047fd96f898867d1845a78a2f2ef7a2ae277dbe65f724
+  content_hash: sha256:f3f0f420c648bb6c622ef87bba9cf5f13a247175e089dc0dd275d027114aef67
+deployments:
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-acceptance-handoff
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: null
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-acceptance-handoff/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:c82d4cb989262f69d697aeb9e61f2ffb7a4cf8fc828e9b9072c9bf7cfc11cec8
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-environment-preflight
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: null
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-environment-preflight/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:c4c84af5f9e8ddae41ba9c297c64f9f9f1e2cfddfc96e14839d1e1868a84bdef
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-feature-spec
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: null
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-feature-spec/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:c6ddc3b408257085aabd26707ad7caff6d060fa753762c08da69205448e65817
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-feature-spec/references/indicator-example.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:68d4c32945fa8f851cf30ded375d602092e0783fcc17dee8ab125b67c1c41806
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-ha-contract
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: null
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-ha-contract/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:b69b9ac67977c8d8e52fce81490445ffa2f2e5c6f79473c86d7f86cbfa26ccf3
+- kind: project-relative
+  target: copilot
+  value: .agents/skills/solar-ha-contract/references/contract.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:ddd222553fd4a19b19828c41c5e6e3dc6ffc98402cfa767dbe78b0186def2e06
+- kind: project-relative
+  target: copilot
+  value: .github/agents/ha-contract-reviewer.agent.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:be6a002c667f9a779b457320d12e6d55548c78f188755b5f764e828138d36bfa
+- kind: project-relative
+  target: copilot
+  value: .github/agents/solar-acceptance-reviewer.agent.md
+  runtime: null
+  scope: project
+  owners:
+  - sujithq/solar-home/packages/solar-dev
+  active_owner: sujithq/solar-home/packages/solar-dev
+  content_hash: sha256:54009ab8434d29e043d047fd96f898867d1845a78a2f2ef7a2ae277dbe65f724

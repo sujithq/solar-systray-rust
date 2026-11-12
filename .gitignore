@@ -22,5 +22,12 @@ target/
 # APM dependency downloads and machine-local deployment identity.
 apm_modules/
 .apm-local/
+# Shared primitives deployed from the committed APM manifest and lockfile.
+/.github/agents/ha-contract-reviewer.agent.md
+/.github/agents/solar-acceptance-reviewer.agent.md
+/.agents/skills/solar-acceptance-handoff/
+/.agents/skills/solar-environment-preflight/
+/.agents/skills/solar-feature-spec/
+/.agents/skills/solar-ha-contract/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust
