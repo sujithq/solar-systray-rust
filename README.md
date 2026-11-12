@@ -846,6 +846,53 @@ grace period, direct readings, connection release when the agent returns, and cl
 It briefly opens menus, never uses your live devices or settings, and cleans up its own process
 and temporary files. It is opt-in because it requires a desktop.
 
+## Contributor tooling
+
+Read [AGENTS.md](AGENTS.md) first. Native Copilot agents and skills under `.github/`
+work without APM: `systray-feature-developer` implements features;
+`spec-conformance` and `test-integrity` review them. The `systray-local-build`
+skill covers preflight, checks and an explicitly requested local HA tray launch
+using the existing launcher, without publishing a release.
+
+[APM](https://microsoft.github.io/apm/) supplies the shared HA contract,
+feature-specification, acceptance-handoff and environment-preflight skills plus
+contract/acceptance reviewers from
+[`sujithq/solar-home/packages/solar-dev`](https://github.com/sujithq/solar-home/tree/main/packages/solar-dev).
+The dependency is pinned to commit
+`5d15cb83d81f25cf5ddf4db4bc10f7e0dd2047b7` in `apm.yml` with `targets: [copilot]`.
+With APM installed, reproduce the committed lockfile:
+
+```powershell
+apm install --frozen --only apm --target copilot
+```
+
+The shared agents `ha-contract-reviewer` and `solar-acceptance-reviewer` deploy
+alongside the native agents in `.github/agents/`. The four skills
+`solar-ha-contract`, `solar-feature-spec`, `solar-acceptance-handoff` and
+`solar-environment-preflight` deploy under `.agents/skills/`, including their
+references. These generated paths, `apm_modules/` and `.apm-local/` are ignored;
+the portable `apm.lock.yaml` is committed. After an intentional pin update,
+run the same install without `--frozen`, verify every expected primitive and
+review the lockfile diff before committing it.
+
+Use APM 0.29.0 or a newer version retaining its hand-authored-file protections.
+[Install](https://microsoft.github.io/apm/reference/cli/install/) preserves
+untracked/edited native files on collision unless `--force` is used.
+[Compile](https://microsoft.github.io/apm/reference/cli/compile/) is unnecessary
+for this agents-and-skills package. Do not compile over the hand-written root
+`AGENTS.md` or `.github/copilot-instructions.md`: forced compilation in APM 0.29.0
+can overwrite hand-written context despite its documented protections.
+The manifest sets `compilation.agents_md.mode: managed_section` without adding
+markers to `AGENTS.md`, so a compile attempting to update that file fails closed.
+Do not migrate these files, add generation/managed-section markers, use
+`--force`/`--force-instructions`, or run cleanup to resolve a collision.
+Preview installs with `apm install --dry-run`; investigate conflicts instead of
+overwriting local guidance. APM can skip unmanaged collisions yet exit zero:
+check that all two shared agents and four skills actually exist and match the
+lockfile's deployed hashes, and that native guidance remains unchanged.
+These tools describe procedures, not authorization
+to access credentials, change HA, replace the running tray or publish.
+
 ## Releases
 
 Releases are made by GitHub Actions in two steps: **Prepare** builds everything and stores it,

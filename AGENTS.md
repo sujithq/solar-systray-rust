@@ -42,3 +42,10 @@ A person has to have **read this diff** before it lands. Telling an agent "merge
 ## Documentation
 
 [`README.md`](README.md) is the user-facing guide: icon styles, menu, notifications, where the data comes from, the config file, build steps, and releases. Update it when any of these change. [`CHANGELOG.md`](CHANGELOG.md) follows Keep a Changelog; its Unreleased section becomes the next release's notes. No documentation framework is configured.
+
+## Contributor tooling
+
+Native Copilot agents/skills in `.github/` work without APM. Use `systray-local-build`
+for local validation and an explicitly requested HA tray launch; use
+`systray-feature-developer` for implementation. Shared Solar tooling is declared in
+`apm.yml`; see README's Contributor tooling section for install and preservation rules.
