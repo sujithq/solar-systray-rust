@@ -846,6 +846,41 @@ grace period, direct readings, connection release when the agent returns, and cl
 It briefly opens menus, never uses your live devices or settings, and cleans up its own process
 and temporary files. It is opt-in because it requires a desktop.
 
+## Contributor tooling
+
+Read [AGENTS.md](AGENTS.md) first. Native Copilot agents and skills under `.github/`
+work without APM: `systray-feature-developer` implements features;
+`spec-conformance` and `test-integrity` review them. The `systray-local-build`
+skill covers preflight, checks and an explicitly requested local HA tray launch
+using the existing launcher, without publishing a release.
+
+[APM](https://microsoft.github.io/apm/) supplies the shared HA contract,
+feature-specification, acceptance-handoff and environment-preflight skills plus
+contract/acceptance reviewers from
+[`sujithq/solar-home/packages/solar-dev`](https://github.com/sujithq/solar-home/tree/main/packages/solar-dev).
+The dependency is declared in `apm.yml` with `targets: [copilot]`. With APM installed:
+
+```powershell
+apm install --only apm
+```
+
+Until that package is published on Solar Home's default branch, installation is
+pending; do not commit a lockfile or generated shared files from a failed install.
+After a successful install, review the shared content and commit the resolved
+`apm.lock.yaml` with any intended deployed files, not `apm_modules/` or `.apm-local/`.
+
+Use APM 0.29.0 or a newer version retaining its hand-authored-file protections.
+[Install](https://microsoft.github.io/apm/reference/cli/install/) preserves
+untracked/edited native files on collision unless `--force` is used.
+[Compile](https://microsoft.github.io/apm/reference/cli/compile/) is optional for
+Copilot and retains hand-written root `AGENTS.md` and
+`.github/copilot-instructions.md` without APM generation markers. Do not migrate
+these files, add generation markers, use `--force`, or run cleanup to resolve a
+collision. Preview with `apm install --dry-run` or
+`apm compile --target copilot --dry-run`; investigate conflicts instead of
+overwriting local guidance. These tools describe procedures, not authorization
+to access credentials, change HA, replace the running tray or publish.
+
 ## Releases
 
 Releases are made by GitHub Actions in two steps: **Prepare** builds everything and stores it,

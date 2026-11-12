@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native Copilot feature-development agent and local-build/HA-launch skill,
+  with shared Solar contributor tooling declared as an APM dependency.
+
 ## [0.2.0] - 2026-11-03
 
 ### Added

@@ -1,0 +1,8 @@
+name: solar-systray-dev
+version: 0.1.0
+description: Shared Solar contributor tooling for the native Windows tray.
+license: MIT
+targets: [copilot]
+dependencies:
+  apm:
+    - sujithq/solar-home/packages/solar-dev
